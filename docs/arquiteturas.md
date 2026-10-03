@@ -490,6 +490,7 @@ As duas razões, em ordem de importância:
 **Natureza:** determinística na intenção (template fixo, preenchimento mecânico), disparada por humano.
 
 **Como falha:**
+
 - Tipografia da marca fora do catálogo Google Fonts, que o runtime remoto não carrega. Nesse caso a execução migra para um plugin rodando no editor, onde a fonte instalada existe. O template e o payload não mudam.
 - Texto estourando a caixa do slide, que é falha de calibração entre o limite da M2 e a grade real do template.
 - Herança de override ao instanciar de uma variante e trocar para outra. O padrão seguro é instanciar direto da variante correta.
@@ -592,18 +593,18 @@ As etapas acima são topologia: quais nós existem e que dado passa entre eles. 
 
 Se você usar LangGraph, os componentes 4, 5 e parte do 7 vêm de fábrica. Os componentes 1, 2, 9 e 10 você escreve de qualquer jeito.
 
-| # | Componente | Peso nesta arquitetura |
-|---|---|---|
-| 1 | Model client / router | Alto |
-| 2 | Context assembly | Alto |
-| 3 | Tool registry | Quase vazio |
-| 4 | Loop control | Baixo: está nas arestas |
-| 5 | State store / checkpointing | **O mais difícil daqui** |
-| 6 | Guardrail plane | Médio |
-| 7 | Observability / tracing | Alto |
-| 8 | Cost & rate governance | Médio |
-| 9 | Failure handling | Médio |
-| 10 | Config & versioning | Alto |
+| #  | Componente                  | Peso nesta arquitetura          |
+| -- | --------------------------- | ------------------------------- |
+| 1  | Model client / router       | Alto                            |
+| 2  | Context assembly            | Alto                            |
+| 3  | Tool registry               | Quase vazio                     |
+| 4  | Loop control                | Baixo: está nas arestas        |
+| 5  | State store / checkpointing | **O mais difícil daqui** |
+| 6  | Guardrail plane             | Médio                          |
+| 7  | Observability / tracing     | Alto                            |
+| 8  | Cost & rate governance      | Médio                          |
+| 9  | Failure handling            | Médio                          |
+| 10 | Config & versioning         | Alto                            |
 
 ## 1. Model client / router
 

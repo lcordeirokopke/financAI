@@ -1,0 +1,5 @@
+langgraph
+pydantic>=2
+pyyaml
+jinja2
+pytest

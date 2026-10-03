@@ -1,7 +1,15 @@
 .env
 .venv
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
 
---
+# dados de entrada e saidas de execucao ficam fora do git
+data/**
+!data/**/
+!data/**/.gitkeep
 
 CLAUDE.md
 /pendentes
+/sunontent/graphs-fluxo-macro
