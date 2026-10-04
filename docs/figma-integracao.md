@@ -61,7 +61,7 @@ O plano educacional recebe as funcionalidades do Professional, e a Figma equipar
 
 O acesso ao MCP é restrito por desenho: allowlist de clientes aprovados (IDEs e agentes como Claude Code, Cursor, VS Code, Codex), escopo `mcp:connect` indisponível para OAuth app próprio, dynamic client registration recusado, personal access token rejeitado no endpoint MCP, e nenhum fluxo de autenticação headless.
 
-Somando com a REST API que não muta canvas: **um serviço de backend do Suno Content não consegue, hoje, criar design no Figma sem humano no circuito.** Declarar isso explicitamente evita que alguém desenhe o E8 apontando para essa porta.
+Somando com a REST API que não muta canvas: **um serviço de backend do Suno Content não consegue, hoje, criar design no Figma sem humano no circuito.** Declarar isso explicitamente evita que alguém desenhe a E9 apontando para essa porta.
 
 Alternativa que tem API de verdade para essa forma: a **Canva Connect API** tem Autofill, que aplica um brand template a partir de dados e devolve um design editável no Canva, chamável de backend. Está atrás de organização Canva Enterprise (planos pagos têm trial limitado enquanto a integração está em desenvolvimento). Se em algum momento a exigência "sem humano no disparo" virar requisito duro, o caminho é esse, não o Figma.
 
@@ -74,12 +74,12 @@ Alternativa que tem API de verdade para essa forma: a **Canva Connect API** tem 
 O pipeline persiste a `Peca` com `CarrosselPayload`. O agente recebe a URL do arquivo Figma e o payload, e executa código de Plugin API via `use_figma` que instancia o componente por slide e preenche as camadas de texto.
 
 - **A favor:** zero infraestrutura nova, o arquivo não precisa estar aberto, o agente enxerga componentes e variáveis do design system, escrita em arquivo existente.
-- **Contra:** exige Full seat em plano pago; o runtime remoto só enxerga o catálogo Google Fonts, então tipografia licenciada da marca não carrega; imagens não entram pela escrita; 20kb de resposta por chamada obriga a fatiar as 9 células; disparo é no IDE, não no dashboard.
+- **Contra:** exige Full seat em plano pago; o runtime remoto só enxerga o catálogo Google Fonts, então tipografia licenciada da marca não carrega; imagens não entram pela escrita; 20kb de resposta por chamada obriga a fatiar por célula; disparo é no IDE, não no dashboard.
 - **Quando é a certa:** existe Full seat e a tipografia da marca é fonte Google. **Verificado nesta conta: o seat é Full e a rota está liberada** (ver a seção de verificação empírica).
 
 ### Rota B: plugin próprio de desenvolvimento local, que busca JSON da API do pipeline
 
-Um plugin pequeno, importado por manifest no desktop app. Ele chama `GET /pecas/{documento_id}` na API do pipeline (domínio declarado em `networkAccess`), lista as 9 células, e o humano escolhe qual materializar. O plugin instancia o template e preenche.
+Um plugin pequeno, importado por manifest no desktop app. Ele chama `GET /runs/{run_id}/carrosseis` no backend do dashboard (domínio declarado em `networkAccess`), lista as células de carrossel publicadas na E8 naquele run (no máximo 3, uma por nível), e o humano escolhe qual materializar. O plugin instancia o template e preenche.
 
 - **A favor:** roda em qualquer plano; roda no editor de verdade, onde a fonte da marca está carregada e imagens funcionam; determinístico, porque é código nosso, não geração; reprodutível por terceiros, o que serve ao Entregável 6; o humano já está no Figma, então o clique é grátis.
 - **Contra:** exige escrever e manter o plugin (uma tarde de trabalho, não mais); desktop app obrigatório; publicar como plugin privado da org exige plano Organization, mas para a demo o import por manifest resolve.
@@ -95,7 +95,7 @@ O dashboard do E8 já vai renderizar o carrossel em HTML. `generate_figma_design
 
 ### Rota D: Figma Buzz, bulk create por planilha
 
-Buzz cria vários assets de uma vez a partir de CSV/XLSX: cada coluna é um campo, cada linha é um asset. O pipeline exporta um CSV com as 9 células, o humano sobe no template Buzz e gera.
+Buzz cria vários assets de uma vez a partir de CSV/XLSX: cada coluna é um campo, cada linha é um asset. O pipeline exporta um CSV com os carrosséis publicados na E8 (no máximo 3 por run), o humano sobe no template Buzz e gera.
 
 - **A favor:** zero código. Feito exatamente para peça de social em volume.
 - **Contra:** upload manual, sem API. O ganho de automação é parcial e o passo humano é burocrático, não editorial.
@@ -144,11 +144,13 @@ A escrita é restrita, a leitura não é. Depois que o humano editou:
 
 Isso ataca diretamente a **Lacuna conhecida 5** de `docs/arquiteturas.md`: hoje ninguém mede concordância entre "o avaliador aprovou" e "o humano publicou". Reler o frame editado e diffar contra o `CarrosselPayload` original transforma essa lacuna em métrica. O quanto o humano precisou reescrever é a validação externa do avaliador, e vale mais que qualquer métrica interna.
 
+No Suno Content, este caminho de volta fica fora do escopo: a concordância entre o avaliador e o humano é medida pelas decisões da E8, gravadas em `decisoes_humanas`. Se ele entrar no escopo, dois pontos pesam: as URLs de `GET /v1/images/{key}` expiram em 30 dias, então uma imagem guardada vai para o Storage como arquivo, não como URL; e um webhook exige um endpoint público para receber o aviso da Figma.
+
 ---
 
 ## Onde isso encaixa na arquitetura
 
-Camada de renderização pendurada no E8, consumindo `Peca` já aprovada. **Não toca E1 a E7.** O grafo, o avaliador e o refinement loop ficam intactos, e é isso que torna seguro adicionar isso agora: se a integração com Figma falhar, o pipeline continua entregando as 9 células.
+A E9 é a camada de renderização disparada depois da E8, consumindo a `Peca` de carrossel publicada na E8. **Não toca E1 a E7.** O grafo, o avaliador e o refinement loop ficam intactos, e é isso que torna seguro adicionar isso agora: se a integração com Figma falhar, o pipeline continua entregando as 9 células.
 
 Efeito nos entregáveis: reforça o 4 (interface com rastreabilidade, porque a rastreabilidade passa a existir dentro do Figma) e o 5 (vídeo demonstrativo, porque "o post nasce editável e o supervisor edita ao vivo" é uma cena de demo muito melhor que um PNG na tela).
 
@@ -183,10 +185,10 @@ Dois detalhes de implementação que custaram uma tentativa e ficam registrados:
 ## Riscos restantes, com mitigação
 
 - **Tipografia da marca**: confirmar se é fonte Google. Se não for, rota B.
-- **20kb de resposta por chamada** no `use_figma`: fatiar por célula, nunca as 9 de uma vez.
+- **20kb de resposta por chamada** no `use_figma`: fatiar por célula, nunca os 3 carrosséis de uma vez.
 - **Imagens e assets** não são suportados na escrita via MCP. Logo, gráfico e foto precisam já existir dentro do componente, ou entrar por `upload_assets`.
 - **Não determinismo do agente**: o template carrega o desenho e o executor só preenche. A instrução é "instancie e preencha", nunca "desenhe um post".
-- **Cota de 200 chamadas por dia**: suficiente com folga para 9 células por documento, mas não para loop de tentativa e erro descuidado.
+- **Cota de 200 chamadas por dia**: suficiente com folga para 3 carrosséis por documento, mas não para loop de tentativa e erro descuidado.
 - **Publicação de plugin privado exige plano Organization**: se a rota B for escolhida, na demo o import por manifest no desktop app resolve.
 
 ## Próximo passo, já que o template não existe

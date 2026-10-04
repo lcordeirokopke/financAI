@@ -1,4 +1,4 @@
--- E6: Scorecard, MetricaResultado e Violacao (docs/arquiteturas.md:161-185).
+-- E6: Scorecard, MetricaResultado e Violacao (docs/arquiteturas.md, Scorecard e violação).
 
 create table scorecards (
   run_id       text not null,
@@ -33,7 +33,7 @@ create table metricas (
   check ((valor_num is null) <> (valor_bool is null))
 );
 
--- Violacao. instrucao_corretiva é reinjetada no retry (docs/arquiteturas.md:210).
+-- Violacao. instrucao_corretiva é reinjetada no retry (docs/arquiteturas.md, Run manifest).
 create table violacoes (
   id                  bigint generated always as identity primary key,
   metrica_id          bigint not null references metricas (id),

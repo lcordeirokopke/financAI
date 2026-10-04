@@ -21,19 +21,24 @@ create trigger documentos_imutavel
   before update or delete on documentos
   for each row execute function bloquear_alteracao();
 
--- Um download. Guarda os metadados do DocumentoFonte (docs/fluxos/ingestao.md:94-131).
+create trigger documentos_sem_truncate
+  before truncate on documentos
+  for each statement execute function bloquear_alteracao();
+
+-- Um download. Guarda os metadados do DocumentoFonte (docs/fluxos/ingestao.md, Arquivo de metadados
+-- e Contrato de saída). O vínculo com o run fica em runs.coleta_id (20261004000003_runs.sql).
 create table coletas (
   id          bigint generated always as identity primary key,
   doc_sha256  char(64) not null references documentos (doc_sha256),
   doc_id      text not null,
   url_origem  text not null,
   coletado_em timestamptz not null,
-  run_id      text,  -- FK adicionada em 20261004000003_runs.sql
-  criado_em   timestamptz not null default now()
+  criado_em   timestamptz not null default now(),
+  unique (id, doc_id, doc_sha256, url_origem, coletado_em)  -- alvo da FK composta de runs
 );
 
 comment on column coletas.doc_id is 'Identificador legível, ex: copom_ata_273. Mesmo doc_id com hash diferente = republicação.';
--- PENDENTE: formato do doc_id por fonte (docs/fluxos/ingestao.md:142).
+-- PENDENTE: formato do doc_id por fonte (docs/fluxos/ingestao.md, Identificação do documento).
 -- PENDENTE: se url_origem é a URL do PDF ou da página de listagem.
 
 create index coletas_doc_sha256_idx on coletas (doc_sha256);
@@ -44,15 +49,22 @@ create trigger coletas_imutavel
   before update or delete on coletas
   for each row execute function bloquear_alteracao();
 
+create trigger coletas_sem_truncate
+  before truncate on coletas
+  for each statement execute function bloquear_alteracao();
+
 -- Bucket privado dos PDFs.
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values ('documentos', 'documentos', false, 62914560, array['application/pdf']);
 
 -- Bloqueia sobrescrita e exclusão de objetos do bucket 'documentos'.
--- O service role ignora RLS, então a garantia é por trigger e não por policy.
--- PENDENTE: confirmar no Supabase hospedado que triggers em storage.objects são permitidos
--- e que um upload com upsert falha com este trigger.
-create or replace function storage_documentos_imutavel()
+-- O service role ignora RLS, então a garantia é por trigger e não por policy. O pipeline envia
+-- ao bucket sem upsert e nunca apaga objetos; um caminho existente devolve 400 Asset Already Exists.
+-- O trigger fica em storage.objects e a função em public, fora do schema gerenciado storage.
+-- PENDENTE: testar no Supabase local e no do site: (1) o primeiro upload passa pelo trigger;
+-- (2) upload com upsert em caminho existente falha; (3) remove falha e o arquivo continua
+-- baixável; (4) a coluna storage.objects.version existe.
+create or replace function public.storage_documentos_imutavel()
 returns trigger
 language plpgsql
 as $$
@@ -74,4 +86,4 @@ $$;
 
 create trigger documentos_bucket_imutavel
   before update or delete on storage.objects
-  for each row execute function storage_documentos_imutavel();
+  for each row execute function public.storage_documentos_imutavel();

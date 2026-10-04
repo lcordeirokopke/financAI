@@ -190,22 +190,36 @@ O objeto que torna uma execução reproduzível. Sem ele, "o mesmo documento com
 
 ```python
 class RunManifest(BaseModel):
-    run_id: str
+    run_id: str                      # <fonte>_<AAAAMMDDTHHMMSSZ>_<6 hex>
     timestamp: datetime
-    doc_id: str
-    doc_sha256: str                  # hash do arquivo fonte, não só o nome
+    modo: Literal["normal", "dev"]   # entrada do run: E0 (download) ou documento de referência (--dev)
+    fonte: Literal["copom", "cvm", "b3"]
+    doc_id: str | None
+    doc_sha256: str | None           # hash do arquivo fonte, não só o nome; None só em run abortado antes do documento
+    url_origem: str | None           # de onde o documento foi baixado
+    coletado_em: datetime | None     # quando foi baixado; no --dev, a data do download congelado
+    coleta_id: int | None            # coleta da E0; None no --dev e no run abortado antes da coleta
     modelos: dict[str, str]          # {"extractor": "<snapshot>", "judge": "<snapshot>", ...}
-    prompts: dict[str, str]          # {"adapter": "v3", "synthesizer": "v2", ...}
+    prompts: dict[str, int]          # {"adapter": 3, "synthesizer": 2, ...} versão do cabeçalho de cada template
     level_specs: dict[Nivel, int]    # {"iniciante": 1, ...} versão do YAML de cada nível
-    glossario_versao: str
-    K: int                           # orçamento de retry vigente nesta execução
+    glossario_versao: int            # chave versao de config/glossario.yaml
+    arquivos_sha256: dict[str, str]  # {"prompts/adapter.j2": "<sha256>", "config/glossario.yaml": "<sha256>", ...}
+    K: int                           # orçamento de retry vigente nesta execução, lido de sunontent/graph.py
     custo_total_tokens: int
     custo_total_brl: Decimal
 ```
 
+O run é registrado no início, antes da E0 ou da leitura da referência. `run_id` identifica uma execução no formato `<fonte>_<AAAAMMDDTHHMMSSZ>_<6 hex>`, ex: `copom_20261004T142205Z_9f2c1a`: fonte, instante de início em UTC (o mesmo de `timestamp`) e 6 caracteres hexadecimais aleatórios. O `__main__.py` gera o `run_id` antes de o grafo começar, nos dois modos. Ele nomeia a pasta do run em `data/runs/` e compõe o `thread_id` de cada célula no checkpoint: `<run_id>:<celula_id>`. Os campos de documento ficam vazios até o `DocumentoFonte` ser entregue. Se o run inteiro falha (E0, referência, leitura na E1 ou teto de orçamento), ele termina com status `abortado`, a classe e a mensagem do erro.
+
 `doc_sha256` existe porque "ata de setembro" não identifica um arquivo: o Banco Central republica PDF corrigido. Dois runs sobre "o mesmo documento" com hashes diferentes não são comparáveis, e sem o hash ninguém descobre isso.
 
 `K` entra no manifesto porque mudar o orçamento de retry muda o resultado. Um scorecard só é comparável com outro se o `K` era o mesmo.
+
+`modo` entra no manifesto porque define a entrada: no dev é o documento de referência, fixo e versionado; no normal, a publicação mais recente. Consultas que medem o avaliador, como a concordância com a decisão humana da E8, filtram por ele.
+
+As versões vêm dos próprios arquivos: a chave `versao` no topo de cada YAML de `config/levels/` e de `config/glossario.yaml`, e a linha `{# versao: N #}` no início de cada template de `prompts/`. O número é inteiro, escolhido à mão, e sobe a cada mudança de conteúdo. `arquivos_sha256` guarda o SHA-256 de cada um desses arquivos e de `config/models.yaml`, calculado no início do run sobre o conteúdo com fim de linha normalizado para `\n`, para que o mesmo arquivo tenha o mesmo hash em qualquer sistema operacional. Dois runs com a mesma `versao` e hashes diferentes revelam um arquivo editado sem subir a versão. `K` é uma constante de `sunontent/graph.py`, e o valor lido no início do run é o que entra no manifest.
+
+A linha de `runs` no Supabase guarda o RunManifest e o estado do run, que não faz parte do manifest: `status` (`em_andamento`, `concluido` ou `abortado`) e, no run abortado, `erro_classe` e `erro_mensagem`. O manifest não muda depois de fechado; `status`, custos e erro são atualizados durante o run.
 
 `Violacao.instrucao_corretiva` é o campo mais importante do sistema inteiro. O refinement loop não reinjeta números: reinjeta instruções. "Flesch 42, esperado >= 60" não diz ao modelo o que fazer. "Quebre as 3 frases marcadas abaixo, cada uma tem mais de 40 palavras" diz. Ver a seção do Refinement Loop.
 
@@ -215,7 +229,8 @@ class RunManifest(BaseModel):
 
 ```mermaid
 flowchart TD
-    DOC["Documento fonte: PDF"] --> ING["E1. Ingestor (deterministico)"]
+    COL["E0. Coleta ou documento de referencia (deterministico)"] --> DOC[("DocumentoFonte: PDF + doc_sha256")]
+    DOC --> ING["E1. Leitura (deterministico)"]
     ING --> DP[("DocumentoProcessado: chunks + TabelaNumeros")]
     DP --> EXT["E2. Extractor and Anchor (LLM estruturado)"]
     EXT --> FSD[("FactSheet nao assinado")]
@@ -263,13 +278,17 @@ flowchart TD
 
 # As etapas, uma por uma
 
-Cada etapa abaixo segue o mesmo formato: o que representa, o que recebe, o que faz, o que decide, o que gera, se é LLM ou código, e como falha.
+Cada etapa abaixo segue o mesmo formato: o que representa, o que recebe, o que faz, o que decide, o que gera, se é LLM ou código, e como falha. Toda gravação citada em **Gera** é feita pelo nó da etapa, por `sunontent/persistencia.py`, no Supabase e na cópia local do run em `data/runs/<run_id>/`.
 
-## E1. Ingestor
+## E0. Coleta
+
+Detalhada em `docs/fluxos/ingestao.md`. No modo normal, baixa a publicação mais recente da fonte, grava o PDF no bucket `documentos` e em `data/sources/`, registra o documento e a coleta no Supabase e entrega à E1 um `DocumentoFonte`. No modo `--dev`, o nó de referência entrega o `DocumentoFonte` do documento congelado em `tests/fixtures/referencia/`, registrado no Supabase se ainda não estiver lá.
+
+## E1. Leitura
 
 **Representa:** a fronteira entre o mundo externo (um PDF de origem não controlada) e o pipeline. Tudo depois daqui trabalha sobre texto normalizado e posicionado.
 
-**Recebe:** caminho de um PDF.
+**Recebe:** `DocumentoFonte` (`docs/fluxos/ingestao.md`), com o caminho local do PDF. Antes de extrair, confere o SHA-256 dos bytes lidos contra `doc_sha256`.
 
 **O que faz:**
 
@@ -282,11 +301,11 @@ Cada etapa abaixo segue o mesmo formato: o que representa, o que recebe, o que f
 
 **Decide:** nada. É determinístico ponta a ponta e é a única etapa que pode ser testada com igualdade exata contra um fixture.
 
-**Gera:** `DocumentoProcessado` com chunks posicionados, `tabela_numeros` e metadados.
+**Gera:** `DocumentoProcessado` com chunks posicionados, `tabela_numeros` e metadados. Grava o texto limpo por página em `documento_paginas`, os chunks em `chunks` e a `tabela_numeros` em `numeros`.
 
 **Natureza:** determinístico. Zero LLM, zero token.
 
-**Como falha:** PDF sem camada de texto e OCR ruim (aborta com `ERRO_INFRA`, não gera claims errados). Número em formato não previsto (`1.234,56` vs `1,234.56`) é o bug mais provável de toda a etapa, e ele se manifesta bem longe daqui: como falso positivo de fidelidade numérica na etapa 6. Teste esta etapa com paranoia.
+**Como falha:** arquivo ausente ou SHA-256 dos bytes diferente do `doc_sha256` do `DocumentoFonte`: aborta o run com erro terminal, indicando o arquivo, o hash esperado e o encontrado, e pedindo para apagar o arquivo local; a próxima coleta grava o PDF de novo. PDF sem camada de texto e OCR ruim: aborta o run com erro terminal, não gera claims errados. Número em formato não previsto (`1.234,56` vs `1,234.56`) é o bug mais provável de toda a etapa, e ele se manifesta bem longe daqui: como falso positivo de fidelidade numérica na etapa 6. Teste esta etapa com paranoia.
 
 ## E2. Extractor & Anchor
 
@@ -303,7 +322,7 @@ Cada etapa abaixo segue o mesmo formato: o que representa, o que recebe, o que f
 
 **Decide:** a granularidade e a seleção. É a decisão de mais alto risco do pipeline: um fato importante que não se torna claim **não existe** para o resto do sistema, e nenhuma etapa posterior detecta a ausência, porque todas validam contra o FactSheet e não contra o documento.
 
-**Gera:** `FactSheet` com `assinado=False`.
+**Gera:** `FactSheet` com `assinado=False`. O FactSheet não assinado fica só no estado do grafo; a E2 grava só os spans em `llm_spans` e o custo em `runs` (cópia em `data/runs/<run_id>/`). O FactSheet é gravado uma vez, pela E3.
 
 **Natureza:** LLM com saída estruturada obrigatória.
 
@@ -324,7 +343,7 @@ Cada etapa abaixo segue o mesmo formato: o que representa, o que recebe, o que f
 
 **Decide:** claim por claim, aprova ou devolve. Sem nota, sem gradiente: booleano.
 
-**Gera:** `FactSheet` com `assinado=True`, ou um pedido de correção parcial.
+**Gera:** `FactSheet` com `assinado=True`, ou um pedido de correção parcial. Grava o resultado de cada rodada em `validacoes_ancora` e, quando todos os claims passam, o FactSheet assinado em `factsheets`, `claims` e `claim_numeros`.
 
 **Natureza:** determinístico. É código puro comparando strings e `Decimal`.
 
@@ -348,7 +367,7 @@ Essa separação é o que evita a trivialização por encurtamento: se adaptar o
 
 **Decide:** seleção de conteúdo, profundidade, e quais analogias usar.
 
-**Gera:** `ConteudoAdaptado`, agnóstico de formato.
+**Gera:** `ConteudoAdaptado`, agnóstico de formato. Grava o `ConteudoAdaptado` em `conteudos_adaptados` e cria as 3 células do nível em `celulas`, no estado `PENDENTE`.
 
 **Natureza:** LLM.
 
@@ -389,7 +408,7 @@ Essa separação é o que evita a trivialização por encurtamento: se adaptar o
 
 **Decide:** estrutura, ordem, gancho, corte de tempo, quantos slides.
 
-**Gera:** `Peca`.
+**Gera:** `Peca`. Grava cada tentativa em `pecas` e `peca_unidade_claims` e atualiza a célula em `celulas`: `tentativa` e estado `GERANDO` ao iniciar, `AVALIANDO` quando a `Peca` passa no schema.
 
 **Natureza:** LLM.
 
@@ -451,7 +470,7 @@ As duas razões, em ordem de importância:
 
 **Decide:** nada nas métricas determinísticas, que só calculam. Só a M6 exerce julgamento, e ela **só pode reprovar**: não existe caminho em que o juiz aprove uma peça que a M1 rejeitou.
 
-**Gera:** `Scorecard` com a lista completa de `Violacao`, cada uma com trecho, esperado, obtido e instrução corretiva.
+**Gera:** `Scorecard` com a lista completa de `Violacao`, cada uma com trecho, esperado, obtido e instrução corretiva. Grava `scorecards`, `metricas` e `violacoes` da tentativa numa única transação.
 
 **Natureza:** híbrido, com a fronteira explícita: 5 métricas determinísticas, 1 juiz LLM, e nenhuma influência do juiz sobre os números.
 
@@ -461,7 +480,7 @@ As duas razões, em ordem de importância:
 
 **Representa:** a decisão de fluxo. É a única etapa que altera a topologia da execução.
 
-**Recebe:** `Scorecard` + contador de tentativas daquela célula.
+**Recebe:** `Scorecard` + contador de tentativas daquela célula. O Router lê a tentativa anterior da célula em `scorecards` e `violacoes` para aplicar a regra 5.
 
 **O que faz:** avalia, em ordem:
 
@@ -473,7 +492,7 @@ As duas razões, em ordem de importância:
 
 **Decide:** aprovar, reprocessar, reprovar ou abortar.
 
-**Gera:** a aresta seguinte, e o estado final da célula.
+**Gera:** a aresta seguinte, e o estado final da célula. O estado final (`APROVADA`, `REPROVADA` ou `ERRO_INFRA`) é gravado em `celulas`; a E7 é o único nó que grava estado final de célula.
 
 **Natureza:** determinístico.
 
@@ -483,13 +502,13 @@ As duas razões, em ordem de importância:
 
 **Representa:** a decisão editorial, que é o único ponto do sistema onde alguém decide publicar. Não é aprovação de qualidade técnica: isso o pipeline já fez.
 
-**Recebe:** a matriz 3x3 completa, com cada célula em um de quatro estados (`APROVADA`, `REPROVADA`, `ERRO_INFRA`, ou aprovada com ressalva do juiz), e o scorecard de cada uma.
+**Recebe:** a matriz 3x3 completa, com cada célula em um de três estados finais (`APROVADA`, `REPROVADA` ou `ERRO_INFRA`), e o scorecard de cada uma, com as justificativas do juiz quando a M6 rodou.
 
-**O que faz:** o humano vê as 9 peças lado a lado, com a rastreabilidade (cada bloco linkado ao claim, cada claim linkado à página do PDF) e o painel de métricas, e marca publica ou descarta por célula.
+**O que faz:** o humano vê as 9 peças lado a lado, com a rastreabilidade (cada bloco linkado ao claim, cada claim linkado à página do PDF) e o painel de métricas, e marca publica ou descarta por célula. O dashboard lê tudo do Supabase: as tabelas do run e o PDF do bucket privado `documentos`, aberto por URL assinada de curta duração gerada no servidor do dashboard. A chave de serviço nunca chega ao navegador.
 
 **Decide:** publicar ou não. A decisão é registrada, não descartada: é o dado que permite medir depois se o avaliador concorda com o julgamento editorial humano.
 
-**Gera:** decisão por célula, persistida.
+**Gera:** uma linha em `decisoes_humanas` por célula, gravada no Supabase e na cópia local. A decisão é final.
 
 **Natureza:** humano.
 
@@ -516,7 +535,7 @@ As duas razões, em ordem de importância:
 
 **Representa:** a peça de carrossel deixando de ser JSON e virando design nativo e editável, dentro do Figma, para o supervisor humano ajustar antes de publicar. Decisão tomada: o carrossel **não** é renderizado pelo sistema como imagem final. O sistema entrega camadas, e a última palavra visual é humana.
 
-**Recebe:** uma `Peca` com `CarrosselPayload` já aprovada na E8, mais a URL do arquivo Figma que contém o template.
+**Recebe:** uma `Peca` com `CarrosselPayload` já publicada na E8, mais a URL do arquivo Figma que contém o template.
 
 **O que faz:** instancia o component set `slide-carrossel` uma vez por slide, define a variante pelo campo `papel`, preenche a camada de texto nomeada com `Slide.texto`, e grava `claim_ids` e `celula_id` em `sharedPluginData` de cada instância. Os slides são agrupados em um frame com auto layout nomeado `{celula_id} (v{tentativa})`.
 
@@ -588,11 +607,12 @@ class CelulaState(BaseModel):
 
 class PipelineState(BaseModel):
     run_id: str
-    manifest: RunManifest              # versões de prompt, LevelSpec e pin de modelo
-    documento: DocumentoProcessado
-    factsheet: FactSheet               # assinado
-    adaptados: dict[Nivel, ConteudoAdaptado]
-    celulas: dict[str, CelulaState]    # 9 entradas, chaveadas por celula_id
+    manifest: RunManifest                          # versões de prompt, LevelSpec e pin de modelo
+    documento_fonte: DocumentoFonte | None = None  # E0 ou nó de referência
+    documento: DocumentoProcessado | None = None   # E1
+    factsheet: FactSheet | None = None             # E3, assinado
+    adaptados: dict[Nivel, ConteudoAdaptado] = {}  # E4
+    celulas: dict[str, CelulaState] = {}           # 9 entradas depois da E4, chaveadas por celula_id
 ```
 
 `celulas` como dicionário chaveado por `celula_id`, e não lista, é o que garante que a atualização paralela de 9 branches não colida: cada branch escreve na sua chave.
@@ -605,6 +625,7 @@ stateDiagram-v2
     PENDENTE --> GERANDO: synthesizer inicia
     GERANDO --> AVALIANDO: Peca produzida e validada pelo schema
     GERANDO --> ERRO_INFRA: timeout, 5xx, ou falha de parse apos 3 tentativas
+    AVALIANDO --> ERRO_INFRA: falha do juiz ou de gravacao apos as tentativas
     AVALIANDO --> APROVADA: todas as metricas dentro da faixa
     AVALIANDO --> GERANDO: violacao e tentativa menor que K
     AVALIANDO --> REPROVADA: violacao e tentativa igual a K
@@ -621,6 +642,8 @@ stateDiagram-v2
 Isso não é otimização, é o que sustenta a conta de custo desta arquitetura. Com checkpoint por célula, uma célula que falha custa 1 síntese mais 1 avaliação para refazer. Com checkpoint do documento inteiro, uma falha em 1 das 9 refaz as 9, o custo de retry sextuplica, e a previsibilidade de custo, que é a principal vantagem desta arquitetura, desaparece.
 
 Se você usar LangGraph, isso significa usar o checkpointer com um thread por célula no fan-out, e não um único thread para o documento.
+
+O checkpointer é o `PostgresSaver` (`langgraph-checkpoint-postgres`) no Postgres do Supabase do site, no schema `langgraph`, que fica fora dos schemas expostos pela Data API. A conexão do checkpointer é criada por `sunontent/persistencia.py` a partir de `SUPABASE_DB_URL`, é separada da conexão das tabelas do projeto, usa `search_path = langgraph`, `autocommit=True` e `row_factory=dict_row`, e passa pelo session pooler (porta 5432) ou pela conexão direta, porque o modo transação do pooler não suporta prepared statements. `setup()` cria as tabelas na primeira execução. O `thread_id` de cada célula é `<run_id>:<celula_id>`. O checkpoint não tem cópia local: as saídas de cada etapa são gravadas pelas funções do projeto no Supabase e em `data/runs/<run_id>/`. Na retomada, o checkpoint decide qual nó roda; antes de chamar o modelo, cada nó confere nas tabelas se a sua linha já existe e a reaproveita.
 
 ---
 
@@ -653,7 +676,7 @@ Escolhe o modelo **por nó**, valida a saída contra o schema Pydantic no decode
 
 Invariantes:
 
-- Nenhum módulo fora de `llm/` importa o SDK do provider.
+- Nenhum módulo além de `sunontent/llm.py` importa o SDK do provider.
 - O modelo do juiz (M6) é de **família diferente** do modelo do extractor (E2). Um juiz que compartilha o modo de falha do extrator confirma o próprio erro: se o extractor leu `4,25%` onde estava `4,50%`, o mesmo modelo relê a âncora e concorda.
 - O contador de retry de parse é **separado** do orçamento `K` de qualidade. Misturar os dois faz um JSON quebrado consumir o orçamento de reescrita.
 - Toda chamada emite um span com nó, modelo, tokens de entrada e saída, e custo.
@@ -685,6 +708,32 @@ Quase vazio nesta arquitetura. As métricas são funções Python chamadas pelo 
 
 O componente mais difícil desta arquitetura, por causa do fan-out de 9 com retry isolado. Requisitos: `celulas` chaveado por `celula_id` para escrita paralela sem colisão, checkpoint com granularidade de célula, e retomada de `ERRO_INFRA` sem refazer o que já passou.
 
+Toda gravação de estado vai primeiro para o Supabase, que é a fonte da verdade, e só então para a cópia local em `data/runs/<run_id>/`. A cópia local tem um arquivo por unidade de gravação, gravado num arquivo temporário e renomeado no fim:
+
+```
+data/runs/<run_id>/
+├── manifest.json                   # RunManifest, status e erro do run; só o processo principal grava
+├── documento.json                  # E1
+├── validacoes/<rodada>.json        # E3, uma por rodada
+├── factsheet.json                  # E3: claims e números do FactSheet assinado
+├── adaptados/<nivel>.json          # E4
+├── spans/<span_id>.json            # spans das etapas sem célula
+├── revisao/<celula_id>.json        # E8: decisão humana
+├── figma/<celula_id>.json          # E9: materialização
+├── publicadas/<celula_id>.json     # peça publicada
+└── celulas/<celula_id>/
+    ├── estado.json                 # estado e tentativa da célula
+    ├── peca.<tentativa>.json
+    ├── scorecard.<tentativa>.json  # métricas e violações da tentativa
+    └── spans/<span_id>.json
+```
+
+Cada célula escreve só na sua pasta, então as 9 células em paralelo não disputam arquivo. O banco não registra onde fica a cópia local: os caminhos derivam de `fonte`, `doc_sha256` e `run_id`. Nenhum consumidor lê `data/runs/`; de `data/sources/`, só a E1 lê o PDF do run, conferido pelo hash. Apagar pastas de `data/runs/` ou arquivos de `data/sources/` não perde nada.
+
+Na retomada, o checkpoint decide qual nó roda, e as tabelas guardam o que cada nó já produziu. Cada nó grava a sua saída no Supabase e só então devolve o estado. Um nó que roda de novo para a mesma `(run_id, celula_id, tentativa)` procura essa saída primeiro: se a linha em `pecas` ou `scorecards` existe, ele a reaproveita, grava a cópia local se ela falta e não chama o modelo. Scorecard, métricas e violações de uma tentativa são gravados numa única transação. Assim a retomada não duplica linhas e não paga duas vezes pela mesma tentativa.
+
+Backend e `thread_id`: ver **Granularidade do checkpoint**. Nenhum módulo além de `sunontent/persistencia.py` abre conexão com o Supabase; o checkpointer recebe a conexão criada por ele.
+
 ## 6. Guardrail plane
 
 Filtros que rodam independentemente da lógica dos nós. Distinção importante: **gate é nó do pipeline e decide qualidade; guardrail é interceptação de harness e decide se aquilo pode transitar.**
@@ -699,17 +748,19 @@ A rastreabilidade do Entregável 4 é uma capacidade de harness, não uma featur
 
 ## 8. Cost & rate governance
 
-Teto de orçamento por documento que **aborta**, não que só loga. Limitador de concorrência no fan-out: 9 sínteses simultâneas estouram rate limit de tier baixo. Backoff em 429. O teto é previsível aqui porque o número de chamadas é fixo, o que torna este componente higiene em vez de emergência.
+Teto de orçamento por documento que **aborta**, não que só loga. Limitador de concorrência no fan-out: 9 sínteses simultâneas estouram rate limit de tier baixo. Backoff em 429. O teto é previsível aqui porque o número de chamadas é fixo, o que torna este componente higiene em vez de emergência. O custo acumulado do run é atualizado na mesma instrução SQL que grava o span (`with s as (insert into llm_spans ... on conflict (span_id) do nothing returning ...) update runs ... from s`), e o total devolvido é o que o teto confere. Nenhum código lê o total, soma e grava de volta.
 
 ## 9. Failure handling
 
-Separar **retriável** (429, timeout, falha de parse, 5xx) de **terminal** (content filter, orçamento esgotado, documento ilegível).
+Separar **retriável** (429, timeout, falha de parse, 5xx, e timeout, erro de conexão ou 5xx ao gravar no Supabase) de **terminal** (content filter, orçamento esgotado, documento ilegível, gravação recusada pelo Supabase e falha ao gravar a cópia local). Um objeto que já existe no bucket `documentos` não é falha: é o mesmo documento, reaproveitado. Numa célula, falha de gravação terminal ou com as tentativas esgotadas leva a célula a `ERRO_INFRA`; fora das células, aborta o run.
 
-E manter `ERRO_INFRA` como estado de célula distinto de `REPROVADA`. Os dois chegam ao revisor humano de formas diferentes: um se retenta com um clique, o outro precisa de intervenção editorial. Colapsar os dois num "falhou" genérico é o erro mais fácil de cometer e o mais chato de desfazer depois.
+E manter `ERRO_INFRA` como estado de célula distinto de `REPROVADA`. Os dois chegam ao revisor humano de formas diferentes: um se retenta pela retomada do checkpoint da célula, disparada por um comando do `__main__.py` que recebe o `run_id`, sem intervenção editorial; o outro precisa de intervenção editorial. Colapsar os dois num "falhou" genérico é o erro mais fácil de cometer e o mais chato de desfazer depois.
 
 ## 10. Config & versioning
 
 Versão de prompt, versão de LevelSpec, pin de modelo com snapshot, e um **run manifest** que amarra tudo isso ao resultado. Sem isso, reprodutibilidade é aspiracional: o mesmo documento com o mesmo código gera outro resultado porque o provider atualizou o modelo por baixo. As instruções de reprodutibilidade do Entregável 6 são, na prática, este componente.
+
+As credenciais ficam no `.env`, fora do git. O `.env.example` versionado lista as variáveis sem valores: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` e `SUPABASE_DB_URL` (conexão do checkpointer e das transações pelo session pooler ou pela conexão direta, nunca pelo pooler de transação, que não aceita prepared statements).
 
 ---
 
@@ -782,7 +833,7 @@ Ordem por dependência, não por importância:
 
 1. **Objetos de dado + LevelSpec.** Nada funciona antes do contrato existir. Comece pelos schemas Pydantic e por um YAML de nível, mesmo com números placeholder.
 2. **Harness 1 e 2** (model client, context assembly). Todos os nós dependem deles. Escrever os nós primeiro produz 6 tratamentos de erro diferentes e uma refatoração garantida.
-3. **E1 Ingestor**, com teste de igualdade exata contra fixture, e paranoia no parsing de número.
+3. **E1 Leitura**, com teste de igualdade exata contra fixture, e paranoia no parsing de número.
 4. **E2 + E3** em conjunto, com fixture de documento anotado à mão.
 5. **As métricas determinísticas M1 a M5, isoladas**, com teste unitário direto. Elas não dependem de nenhuma chamada de LLM e são o Entregável 2. Podem e devem ser construídas antes de existir qualquer geração.
 6. **E4 + E5** para uma única célula, ponta a ponta.

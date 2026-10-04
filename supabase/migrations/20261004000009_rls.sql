@@ -1,6 +1,5 @@
--- RLS ligado em todas as tabelas, sem policies: só o service role (pipeline) acessa.
--- PENDENTE: policies de leitura do dashboard (E8) e de escrita da decisão humana dependem da
--- tecnologia e da autenticação do dashboard, ainda não definidas.
+-- RLS ligado em todas as tabelas, sem policies: só o service role acessa. Ele é usado pelo
+-- pipeline e pelo servidor do dashboard (E8), que nunca envia a chave ao navegador.
 
 alter table documentos            enable row level security;
 alter table coletas               enable row level security;

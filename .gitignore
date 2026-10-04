@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv
 __pycache__/
 *.pyc
@@ -14,3 +16,7 @@ CLAUDE.md
 /pendentes
 /sunontent/graphs-fluxo-macro
 .claude
+
+# arquivos locais do Supabase CLI
+supabase/.temp/
+supabase/.branches/

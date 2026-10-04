@@ -6,11 +6,15 @@ project_id = "sunontent"
 [api]
 enabled = true
 port = 54321
+# public e storage são sempre expostos; o schema langgraph (checkpoint do LangGraph) fica fora desta
+# lista e dos schemas expostos do projeto do site.
 schemas = ["public", "storage"]
 max_rows = 1000
 
 [db]
 port = 54322
+# PENDENTE: conferir com SHOW server_version no projeto do site; o valor precisa ser igual ao major
+# do banco remoto. Conferir também no painel que o schema langgraph não está entre os schemas expostos.
 major_version = 15
 
 [db.seed]
@@ -19,10 +23,10 @@ sql_paths = ["./seed.sql"]
 
 [storage]
 enabled = true
-# Limite da E0: documento maior que 60 MB é erro terminal (docs/fluxos/ingestao.md).
+# Limite da E0: documento maior que 60 MiB (62.914.560 bytes) é erro terminal (docs/fluxos/ingestao.md).
 # PENDENTE: confirmar o limite por arquivo do plano contratado no Supabase hospedado.
 file_size_limit = "60MiB"
 
 [auth]
-# PENDENTE: autenticação do dashboard (E8) não definida; a tecnologia do dashboard ainda não foi escolhida.
+# O dashboard (E8) não usa o Supabase Auth: roda no servidor e acessa o banco com o service role.
 enabled = true

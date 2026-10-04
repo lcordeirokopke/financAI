@@ -1,7 +1,7 @@
 -- E4 (ConteudoAdaptado), células e E5 (Peca por tentativa).
 
--- ConteudoAdaptado (docs/arquiteturas.md:97-112). Um por nível, compartilhado pelas 3 células do
--- nível e nunca regerado no retry (docs/arquiteturas.md:529).
+-- ConteudoAdaptado (docs/arquiteturas.md, Conteúdo adaptado). Um por nível, compartilhado pelas 3 células do
+-- nível e nunca regerado no retry (docs/arquiteturas.md, Regras do loop).
 create table conteudos_adaptados (
   run_id             text not null references factsheets (run_id),
   nivel              nivel not null,
@@ -12,7 +12,7 @@ create table conteudos_adaptados (
   primary key (run_id, nivel)
 );
 
--- Estado da célula (CelulaState, docs/arquiteturas.md:543-550). Sempre 9 por run.
+-- Estado da célula (CelulaState, docs/arquiteturas.md, O objeto de estado). Sempre 9 por run, criadas pela E4.
 create table celulas (
   run_id             text not null references runs (run_id),
   celula_id          text not null,
@@ -20,10 +20,10 @@ create table celulas (
   formato            formato not null,
   estado             estado_celula not null default 'PENDENTE',
   tentativa          int not null default 0 check (tentativa >= 0),
-  -- PENDENTE: motivo de REPROVADA (incluindo não convergência, docs/arquiteturas.md:451, 574)
+  -- PENDENTE: motivo de REPROVADA (incluindo não convergência, docs/arquiteturas.md, E7. Router, Regras do loop e Ciclo de vida de uma célula)
   -- não tem campo na documentação.
   motivo_reprovacao  text,
-  -- PENDENTE: contador de retry de parse separado de K (docs/arquiteturas.md:621) sem campo definido.
+  -- PENDENTE: contador de retry de parse separado de K (docs/arquiteturas.md, 1. Model client / router) sem campo definido.
   tentativas_parse   int not null default 0,
   atualizado_em      timestamptz not null default now(),
   primary key (run_id, celula_id),
@@ -33,8 +33,8 @@ create table celulas (
 comment on column celulas.tentativa is
   'Última tentativa gerada. 0 = nenhuma. PENDENTE: CelulaState começa em 0 e Peca é 1-indexada.';
 
--- Peca, uma linha por tentativa (docs/arquiteturas.md:150-157). O histórico é necessário para o
--- Router comparar violações de tentativas seguidas (docs/arquiteturas.md:452).
+-- Peca, uma linha por tentativa (docs/arquiteturas.md, Peça final). O histórico é necessário para o
+-- Router comparar violações de tentativas seguidas (docs/arquiteturas.md, E7. Router).
 create table pecas (
   run_id    text not null,
   celula_id text not null,
@@ -50,7 +50,7 @@ create table pecas (
 );
 
 -- Rastreabilidade granular: cada unidade estrutural (seção, slide, cena) ligada aos seus claims
--- (docs/arquiteturas.md:367, 468, 661). Permite consulta claim -> peças e claim -> página do PDF.
+-- (docs/arquiteturas.md, E5. Format Synthesizer, E8. Revisão humana e 7. Observability / tracing). Permite consulta claim -> peças e claim -> página do PDF.
 create table peca_unidade_claims (
   run_id         text not null,
   celula_id      text not null,
