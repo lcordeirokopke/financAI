@@ -1,0 +1,2 @@
+-- Dados iniciais para desenvolvimento local (supabase db reset).
+-- Os valores fixos do domínio (níveis, formatos, fontes) são enums nas migrations e não precisam de seed.

@@ -1,0 +1,77 @@
+-- Documentos fonte e coletas (E0).
+-- Regra: todo documento fica armazenado, endereçado por doc_sha256, e nunca é sobrescrito nem apagado.
+-- Cada download é uma coleta; várias coletas podem apontar para o mesmo documento.
+
+-- Um documento físico por hash. O PDF fica no bucket 'documentos' em <fonte>/<doc_sha256>.pdf.
+create table documentos (
+  doc_sha256     char(64) primary key check (doc_sha256 ~ '^[0-9a-f]{64}$'),
+  fonte          fonte not null,
+  tipo_documento tipo_documento not null,
+  storage_path   text not null unique,
+  tamanho_bytes  bigint not null check (tamanho_bytes > 0 and tamanho_bytes <= 62914560),
+  criado_em      timestamptz not null default now(),
+  check (storage_path = fonte::text || '/' || doc_sha256 || '.pdf')
+);
+
+comment on table documentos is 'Documento fonte imutável, um por doc_sha256.';
+comment on column documentos.doc_sha256 is 'SHA-256 dos bytes baixados, hex minúsculo.';
+-- PENDENTE: validação de que o arquivo é PDF (docs/fluxos/ingestao.md, Pendências).
+
+create trigger documentos_imutavel
+  before update or delete on documentos
+  for each row execute function bloquear_alteracao();
+
+-- Um download. Guarda os metadados do DocumentoFonte (docs/fluxos/ingestao.md:94-131).
+create table coletas (
+  id          bigint generated always as identity primary key,
+  doc_sha256  char(64) not null references documentos (doc_sha256),
+  doc_id      text not null,
+  url_origem  text not null,
+  coletado_em timestamptz not null,
+  run_id      text,  -- FK adicionada em 20261004000003_runs.sql
+  criado_em   timestamptz not null default now()
+);
+
+comment on column coletas.doc_id is 'Identificador legível, ex: copom_ata_273. Mesmo doc_id com hash diferente = republicação.';
+-- PENDENTE: formato do doc_id por fonte (docs/fluxos/ingestao.md:142).
+-- PENDENTE: se url_origem é a URL do PDF ou da página de listagem.
+
+create index coletas_doc_sha256_idx on coletas (doc_sha256);
+create index coletas_doc_id_idx on coletas (doc_id);
+create index coletas_coletado_em_idx on coletas (coletado_em desc);
+
+create trigger coletas_imutavel
+  before update or delete on coletas
+  for each row execute function bloquear_alteracao();
+
+-- Bucket privado dos PDFs.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('documentos', 'documentos', false, 62914560, array['application/pdf']);
+
+-- Bloqueia sobrescrita e exclusão de objetos do bucket 'documentos'.
+-- O service role ignora RLS, então a garantia é por trigger e não por policy.
+-- PENDENTE: confirmar no Supabase hospedado que triggers em storage.objects são permitidos
+-- e que um upload com upsert falha com este trigger.
+create or replace function storage_documentos_imutavel()
+returns trigger
+language plpgsql
+as $$
+begin
+  if old.bucket_id = 'documentos' then
+    if tg_op = 'DELETE' then
+      raise exception 'objetos do bucket documentos não podem ser apagados';
+    end if;
+    -- Atualizações de metadado de acesso são permitidas; troca de conteúdo, nome ou bucket não.
+    if new.bucket_id is distinct from old.bucket_id
+       or new.name is distinct from old.name
+       or new.version is distinct from old.version then
+      raise exception 'objetos do bucket documentos não podem ser sobrescritos';
+    end if;
+  end if;
+  return case when tg_op = 'DELETE' then old else new end;
+end;
+$$;
+
+create trigger documentos_bucket_imutavel
+  before update or delete on storage.objects
+  for each row execute function storage_documentos_imutavel();

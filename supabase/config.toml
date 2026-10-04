@@ -1,0 +1,28 @@
+# Configuração do Supabase CLI para desenvolvimento local (supabase start / supabase db reset).
+# Os valores não listados aqui usam o padrão do CLI.
+
+project_id = "sunontent"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 15
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
+
+[storage]
+enabled = true
+# Limite da E0: documento maior que 60 MB é erro terminal (docs/fluxos/ingestao.md).
+# PENDENTE: confirmar o limite por arquivo do plano contratado no Supabase hospedado.
+file_size_limit = "60MiB"
+
+[auth]
+# PENDENTE: autenticação do dashboard (E8) não definida; a tecnologia do dashboard ainda não foi escolhida.
+enabled = true

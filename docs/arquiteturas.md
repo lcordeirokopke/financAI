@@ -215,7 +215,7 @@ class RunManifest(BaseModel):
 
 ```mermaid
 flowchart TD
-    DOC["Documento fonte: PDF ou texto"] --> ING["E1. Ingestor (deterministico)"]
+    DOC["Documento fonte: PDF"] --> ING["E1. Ingestor (deterministico)"]
     ING --> DP[("DocumentoProcessado: chunks + TabelaNumeros")]
     DP --> EXT["E2. Extractor and Anchor (LLM estruturado)"]
     EXT --> FSD[("FactSheet nao assinado")]
@@ -269,7 +269,7 @@ Cada etapa abaixo segue o mesmo formato: o que representa, o que recebe, o que f
 
 **Representa:** a fronteira entre o mundo externo (um PDF de origem não controlada) e o pipeline. Tudo depois daqui trabalha sobre texto normalizado e posicionado.
 
-**Recebe:** caminho de um PDF ou texto bruto.
+**Recebe:** caminho de um PDF.
 
 **O que faz:**
 
@@ -353,6 +353,26 @@ Essa separação é o que evita a trivialização por encurtamento: se adaptar o
 **Natureza:** LLM.
 
 **Como falha:** trivialização (descarta claim essencial e mantém só o trivial), analogia enganosa (a analogia está lá, é estruturada, e explica errado: só o juiz LLM da etapa 6 pega isso), e **duplicação de prompt** entre os 3 adapters, que é problema de manutenção e não de runtime: o prompt deve ser um template único parametrizado pelo LevelSpec, nunca 3 arquivos.
+
+### Proposta em avaliação: base de conceitos financeiros (banco vetorial)
+
+**Ideia:** um banco vetorial com o que é cada termo e cada conceito financeiro (definição, mecanismo, analogias aprovadas), consultado pelo adapter como repertório, para que as explicações não sejam inventadas pelo modelo.
+
+**O que ela ataca:** o erro de **conceito** ("Selic é a taxa do cartão de crédito", analogia que explica errado). Não ataca o erro sobre o **documento** (número ou fato trocado), que já é coberto por FactSheet, M1 e M6.
+
+**Uso previsto:** o adapter (E4) recebe a definição e as analogias aprovadas dos termos presentes nos claims que selecionou. O juiz (M6) pode receber a mesma definição como referência ao julgar se uma analogia está correta. O extractor (E2) **não** consulta a base: ele lê só o documento.
+
+**Problemas possíveis:**
+
+1. **Segunda fonte de fatos.** Uma definição com número ou data ("a Selic, hoje em 10,5%") pode vazar para a peça, e um bloco passaria a afirmar algo que não vem do documento. Regras necessárias: entradas atemporais, sem números nem datas; conteúdo da base só em explicações e analogias, nunca como afirmação sobre o documento; `Bloco.claim_ids` continua obrigatório e a `Analogia` aponta para um `conceito_id`.
+2. **Alucinação transferida para a base.** Se as entradas forem escritas por LLM, o erro só muda de lugar e passa a ter aparência de fonte confiável. Exige fontes oficiais (Banco Central, CVM, B3, Tesouro Direto) com link guardado por entrada e revisão humana de cada uma.
+3. **Mecanismo geral confundido com causa específica.** A base diz que juros altos tendem a encarecer o crédito; o modelo pode transformar isso em "o Copom subiu os juros para encarecer o crédito", que é afirmação sobre o documento sem lastro nele. O motivo de cada decisão continua vindo só da FactSheet.
+4. **Busca por similaridade onde a pergunta é exata.** A maior parte das consultas é por nome do termo, que é busca exata pela forma base da palavra. Usar só vetorial devolve sempre os vizinhos mais próximos, mesmo irrelevantes (definição de CDI quando o termo era Selic), e depende de limiar arbitrário. Caminho previsto: busca exata pelo termo primeiro, vetorial só como complemento para conceitos não nomeados e mecanismos.
+5. **Duplicação com o glossário.** Termo, nível mínimo e analogias já pertencem ao `config/glossario.yaml`, lido pela M4 e pela M5. Com a informação em dois lugares, prompt e avaliador podem passar a ler versões diferentes, o mesmo desalinhamento que o LevelSpec de fonte única evita. Exige decidir qual é a fonte original: o YAML copiado para o banco por script, ou o banco como fonte.
+6. **Reprodutibilidade.** Se a base for editada sem versão, o mesmo documento gera peças diferentes conforme o dia. A versão da base usada precisa entrar no `RunManifest`.
+7. **Contexto maior e mais caro.** Cada chamada de adapter (e de juiz, se ele também consultar) recebe mais texto, e o adapter pode passar a explicar conceitos demais, inflando a peça e prejudicando M2 e M3.
+8. **Viés de vocabulário.** Se a base trouxer definições técnicas para o nível Iniciante, o modelo tende a copiar o jargão da definição. A entrada precisa ter versões por nível (definição simples e técnica), e o adapter recebe só a do seu nível.
+9. **Custo de manutenção.** A base precisa ser montada, revisada e atualizada antes de ter valor, e cobre só os conceitos cadastrados: termo ausente volta ao comportamento de hoje, sem aviso.
 
 ## E5. Format Synthesizer (9 instâncias isoladas)
 
@@ -474,6 +494,23 @@ As duas razões, em ordem de importância:
 **Natureza:** humano.
 
 **Como falha:** peça `APROVADA` pelo pipeline e descartada pelo humano por motivo que nenhuma métrica captura (tom, oportunidade editorial, repetição com conteúdo já publicado). Essa divergência é informação valiosa, não ruído: é a medida de quanto o avaliador cobre do que importa de verdade.
+
+### Proposta em avaliação: detecção de repetição (banco vetorial)
+
+**Ideia:** guardar o embedding de cada peça publicada. Ao abrir a matriz de um novo documento, o dashboard compara cada peça com as já publicadas e avisa: "esta peça é 0,91 similar a uma publicada em 12/08". Ataca o motivo de descarte "repetição com conteúdo já publicado", que nenhuma métrica da E6 captura.
+
+**Natureza:** apoio à decisão. O banco só informa a pessoa: não aprova, não reprova e não altera o estado da célula. Por isso a imprecisão da similaridade não compromete o portão de qualidade.
+
+**Problemas possíveis:**
+
+1. **Similaridade de assunto não é repetição.** Atas do Copom consecutivas falam do mesmo tema com o mesmo vocabulário. Duas peças sobre reuniões diferentes podem sair muito similares sem serem repetidas, e o aviso dispararia em quase toda peça de Copom. Comparar só por embedding mede assunto, não se o conteúdo é o mesmo.
+2. **Repetição real pode passar despercebida.** A mesma informação dita com outra estrutura (carrossel contra artigo, iniciante contra avançado) fica mais distante no espaço vetorial e pode não ser sinalizada.
+3. **Limiar arbitrário.** O valor de corte (0,85? 0,90?) não tem base até ser medido contra decisões reais de descarte, e muda se o modelo de embedding mudar. Exige calibração com o histórico da E8.
+4. **Aviso ignorado.** Se o aviso aparecer em excesso (problema 1), o revisor aprende a ignorá-lo e ele perde o valor justamente quando a repetição for real.
+5. **Comparação dentro da mesma matriz.** As 3 peças de um mesmo nível compartilham o `ConteudoAdaptado` e são parecidas por construção. A comparação precisa se restringir a peças de outros documentos já publicadas, e de preferência do mesmo nível e formato.
+6. **Troca do modelo de embedding.** Embeddings de modelos diferentes não são comparáveis. Trocar o modelo exige recalcular todo o histórico, e o modelo usado precisa ficar registrado junto de cada embedding.
+7. **Depende de histórico.** Nas primeiras execuções não há peças publicadas, e a funcionalidade não tem o que mostrar na demonstração sem uma base inicial de publicações.
+8. **Informação insuficiente para decidir.** O número de similaridade sozinho não ajuda o revisor. O aviso precisa mostrar a peça publicada e a data, para que a pessoa compare e decida.
 
 ## E9. Materialização no Figma (carrossel)
 
