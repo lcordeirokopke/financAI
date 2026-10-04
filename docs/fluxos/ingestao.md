@@ -20,7 +20,15 @@ Fontes atendidas:
 | CVM                   | `sunontent/ingestao/cvm.py`   | `cvm_fato_relevante` |
 | B3                    | `sunontent/ingestao/b3.py`    | `b3_release`         |
 
-O documento baixado é sempre um PDF, nas três fontes. A forma de validar o formato fica em **Pendências**.
+O documento baixado é sempre um PDF, nas três fontes. O formato é validado só pelos primeiros bytes (`%PDF-`): o `Content-Type` da resposta é ignorado, porque a CVM serve o PDF como `text/html`. O PDF vai ao bucket sempre como `application/pdf`.
+
+Como cada script localiza a publicação mais recente:
+
+| Fonte | Listagem | PDF |
+| ----- | -------- | --- |
+| Copom | API JSON do site do Banco Central: `api/servico/sitebcb/copom/atas?quantidade=1` devolve o número da última reunião, e `atas_detalhes?nro_reuniao=<n>` devolve a URL do PDF. | `urlPdfAta` |
+| CVM | Conjunto de dados aberto IPE (`dados.cvm.gov.br`, um ZIP por ano com um CSV em latin-1). Filtra a categoria `Fato Relevante` e escolhe a maior `Data_Entrega`, com desempate pelo `numProtocolo`. Se o ZIP do ano corrente não existe (HTTP 404), usa o do ano anterior. | `Link_Download` (RAD/ENET) |
+| B3 | API de arquivos da MZIQ usada pelo site de RI da B3 S.A. (`ri.b3.com.br`), categoria `central_de_resultados_release_de_resultados`, idioma `pt_BR`. Escolhe a maior data de publicação. | `link_url` ou `permalink` |
 
 ## Onde cada peça vive
 
@@ -70,7 +78,7 @@ python -m sunontent copom
 
 1. O `__main__.py` confere as credenciais do Supabase, gera o `run_id`, registra o run em `runs` com status `em_andamento` e inicia o grafo pela E0.
 2. A E0 executa `ingestao/copom.py`, que localiza a publicação mais recente e baixa o documento inteiro **para a memória**, sem tocar no disco.
-3. Ainda em memória, o script confere o limite de 60 MiB (62.914.560 bytes), valida o formato e calcula o `doc_sha256`. Se qualquer verificação falhar, o run termina com status `abortado`, sem nada no bucket, em `documentos`, em `coletas` nem em `data/sources/`.
+3. Ainda em memória, o script confere o limite de 50 MiB (52.428.800 bytes), valida o formato e calcula o `doc_sha256`. Se qualquer verificação falhar, o run termina com status `abortado`, sem nada no bucket, em `documentos`, em `coletas` nem em `data/sources/`.
 4. Só se tudo deu certo, o script grava no Supabase, nesta ordem:
    1. Se o `doc_sha256` ainda não está em `documentos`, envia o PDF ao bucket `documentos` em `copom/<doc_sha256>.pdf`, sem `upsert`. Se o objeto já existe (HTTP 400 "Asset Already Exists"), ele é o mesmo arquivo, porque o caminho é o hash, e é reaproveitado.
    2. Numa única transação, insere a linha em `documentos` (sem efeito se o hash já existe), insere a linha em `coletas` e grava em `runs` o `doc_id`, o `doc_sha256`, o `coleta_id`, a `url_origem` e o `coletado_em` devolvidos pelo insert da coleta.
@@ -115,7 +123,7 @@ Toda coleta grava, na pasta do documento, um `.json` próprio, `<doc_sha256>.<co
   "doc_id": "copom_ata_273",
   "doc_sha256": "9f2c...e41a",
   "url_origem": "https://...",
-  "coletado_em": "2026-10-03T14:22:05-03:00"
+  "coletado_em": "2026-10-03T17:22:05Z"
 }
 ```
 
@@ -123,8 +131,8 @@ Toda coleta grava, na pasta do documento, um `.json` próprio, `<doc_sha256>.<co
 | --------------- | --------------------------------------------------------------- |
 | `doc_id`      | Qual publicação é. Legível.                                 |
 | `doc_sha256`  | Qual versão exata do arquivo. Hash SHA-256 dos bytes baixados. |
-| `url_origem`  | De onde o arquivo foi baixado.                                  |
-| `coletado_em` | Quando o arquivo foi baixado de verdade.                        |
+| `url_origem`  | De onde o arquivo foi baixado: a URL que devolveu os bytes do PDF, não a da página de listagem. |
+| `coletado_em` | Quando o arquivo foi baixado de verdade, em UTC (`AAAA-MM-DDTHH:MM:SSZ`). |
 
 No modo desenvolvimento, esses valores vêm do `.json` de referência, e o `doc_sha256` é conferido contra os bytes do documento a cada run. Por isso `coletado_em` registra a data em que aquele documento de referência foi baixado, e não a data do run.
 
@@ -156,7 +164,15 @@ Os dois campos respondem perguntas diferentes e por isso coexistem no RunManifes
 
 Dois runs com o mesmo `doc_id` e hashes diferentes processaram arquivos diferentes e não são comparáveis diretamente. Sem o hash, essa diferença seria invisível.
 
-O formato do `doc_id` por fonte fica em **Pendências**: Copom tem número de reunião, mas CVM e B3 precisam de outro identificador.
+Formato do `doc_id` por fonte:
+
+| Fonte | Formato | Exemplo |
+| ----- | ------- | ------- |
+| Copom | `copom_ata_<número da reunião>` | `copom_ata_281` |
+| CVM | `cvm_fato_relevante_<Codigo_CVM>_<numProtocolo>` | `cvm_fato_relevante_24708_1574050` |
+| B3 | `b3_release_<ano>_<trimestre>T` | `b3_release_2026_2T` |
+
+Os formatos da CVM e da B3 ainda têm pontos em aberto (ver **Pendências**).
 
 ## Documento de referência
 
@@ -216,7 +232,7 @@ No modo desenvolvimento, documento, hash e metadados são fixos e versionados, e
 
 - `User-Agent` definido explicitamente.
 - Retentativa com backoff exponencial para falhas de conexão, com a fonte e com o Supabase.
-- Baixam o documento inteiro para a memória, com limite de 60 MiB (62.914.560 bytes). Só gravam alguma coisa, no Supabase ou em disco, depois da validação de formato e do cálculo do `doc_sha256`.
+- Baixam o documento inteiro para a memória, com limite de 50 MiB (52.428.800 bytes). Só gravam alguma coisa, no Supabase ou em disco, depois da validação de formato e do cálculo do `doc_sha256`.
 - Gravam primeiro no Supabase e só então a cópia local (o PDF e depois o `.json`). O PDF vai pela API do Storage; as linhas de `documentos`, `coletas` e `runs` vão numa única transação pela conexão Postgres (`SUPABASE_DB_URL`), por `sunontent/persistencia.py`.
 - Se a resposta da transação se perde, releem `runs.coleta_id` e só repetem a transação se ele estiver vazio.
 - Nunca usam `upsert` no bucket nem `update` ou `delete` em `documentos` e `coletas`: um objeto ou hash que já existe é reaproveitado.
@@ -249,7 +265,7 @@ tests/fixtures/
 | Timeout, erro de conexão, HTTP 5xx, HTTP 429 no download da fonte | Retriável | Retentativa com backoff exponencial; esgotadas as tentativas, vira terminal. |
 | HTTP 404 ou publicação não localizada na página da fonte | Terminal | Aborta o run com mensagem indicando a fonte e a URL. |
 | Conteúdo baixado não corresponde ao formato esperado (ex: página de erro HTML no lugar do documento) | Terminal | Aborta o run sem enviar nada ao bucket nem gravar em `documentos`, `coletas` ou `data/sources/`. |
-| Documento baixado maior que 60 MiB (62.914.560 bytes) | Terminal | Aborta o run sem enviar nada ao bucket nem gravar em `documentos`, `coletas` ou `data/sources/`, com mensagem indicando a fonte, a URL e o tamanho. |
+| Documento baixado maior que 50 MiB (52.428.800 bytes) | Terminal | Aborta o run sem enviar nada ao bucket nem gravar em `documentos`, `coletas` ou `data/sources/`, com mensagem indicando a fonte, a URL e o tamanho. |
 | Timeout, erro de conexão ou HTTP 5xx ao gravar no Supabase (bucket ou banco) | Retriável | Retentativa com backoff exponencial; esgotadas as tentativas, vira terminal. Se nem o status do run puder ser gravado, o erro fica só em `data/runs/<run_id>/manifest.json` e a linha do run fica `em_andamento`. |
 | Gravação recusada pelo Supabase: upload recusado pelo bucket (HTTP 4xx que não seja "Asset Already Exists"), violação de constraint ou trigger de imutabilidade no banco | Terminal | Aborta o run com a resposta do Supabase. A transação é desfeita inteira: nenhuma linha em `documentos` nem em `coletas`. Um objeto já enviado ao bucket fica e é reaproveitado na próxima coleta. |
 | Falha ao gravar em `data/sources/` (ex: arquivo aberto em outro programa, disco cheio) | Terminal | Aborta o run com mensagem indicando o arquivo e a causa. O documento e a coleta já estão no Supabase e continuam válidos. Se o arquivo estiver em uso, a mensagem pede para fechá-lo (ex: "feche o arquivo `data/sources/copom/<doc_sha256>.pdf`"). |
@@ -260,5 +276,6 @@ Todos os erros desta tabela vêm de `ingestao/` e acontecem sem existir célula 
 
 ## Pendências
 
-- Como validar que o arquivo baixado é um PDF (ex: primeiros bytes `%PDF-`, `Content-Type` da resposta HTTP ou os dois).
-- Formato do `doc_id` para cada fonte.
+- `doc_id` da CVM: o `numProtocolo` muda a cada nova versão do mesmo fato relevante (`Versao` 1, 2, 3 têm protocolos diferentes), então uma republicação gera outro `doc_id`, e não o mesmo `doc_id` com outro hash. O conjunto de dados IPE não tem um identificador que se mantenha entre versões.
+- `doc_id` da B3: formato `b3_release_<ano>_<trimestre>T` ainda não confirmado.
+- Documentos de referência: `tests/fixtures/referencia/<fonte>.pdf`, `<fonte>.json` e `<fonte>.anotacao.yaml` ainda não foram congelados. Até lá, os testes da E0 que conferem `doc_sha256` e `doc_id` contra `<fonte>.json` são pulados, e o corpo do download simulado é um PDF substituto mínimo. As respostas de listagem em `tests/fixtures/http/<fonte>/` apontam para as publicações mais recentes na data da sua gravação: Copom ata 281, CVM `cvm_fato_relevante_24708_1574050` e B3 2T26.

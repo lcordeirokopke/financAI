@@ -8,14 +8,14 @@ create table documentos (
   fonte          fonte not null,
   tipo_documento tipo_documento not null,
   storage_path   text not null unique,
-  tamanho_bytes  bigint not null check (tamanho_bytes > 0 and tamanho_bytes <= 62914560),
+  tamanho_bytes  bigint not null check (tamanho_bytes > 0 and tamanho_bytes <= 52428800),
   criado_em      timestamptz not null default now(),
   check (storage_path = fonte::text || '/' || doc_sha256 || '.pdf')
 );
 
 comment on table documentos is 'Documento fonte imutável, um por doc_sha256.';
 comment on column documentos.doc_sha256 is 'SHA-256 dos bytes baixados, hex minúsculo.';
--- PENDENTE: validação de que o arquivo é PDF (docs/fluxos/ingestao.md, Pendências).
+-- O formato PDF é validado pela E0 só pelos primeiros bytes (%PDF-), antes de qualquer gravação.
 
 create trigger documentos_imutavel
   before update or delete on documentos
@@ -38,8 +38,10 @@ create table coletas (
 );
 
 comment on column coletas.doc_id is 'Identificador legível, ex: copom_ata_273. Mesmo doc_id com hash diferente = republicação.';
--- PENDENTE: formato do doc_id por fonte (docs/fluxos/ingestao.md, Identificação do documento).
--- PENDENTE: se url_origem é a URL do PDF ou da página de listagem.
+comment on column coletas.url_origem is 'URL de onde vieram os bytes do PDF, não a da página de listagem.';
+-- PENDENTE: doc_id da CVM (cvm_fato_relevante_<Codigo_CVM>_<numProtocolo>) muda a cada versão do
+-- documento, porque a CVM gera numProtocolo novo; e doc_id da B3 (b3_release_<ano>_<trimestre>T)
+-- não confirmado (docs/fluxos/ingestao.md, Pendências).
 
 create index coletas_doc_sha256_idx on coletas (doc_sha256);
 create index coletas_doc_id_idx on coletas (doc_id);
@@ -53,9 +55,14 @@ create trigger coletas_sem_truncate
   before truncate on coletas
   for each statement execute function bloquear_alteracao();
 
--- Bucket privado dos PDFs.
+-- Bucket privado dos PDFs. O db reset recria o banco, mas não apaga o bucket: se ele já existe,
+-- a configuração é reaplicada. Os arquivos dentro dele não são alterados.
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-values ('documentos', 'documentos', false, 62914560, array['application/pdf']);
+values ('documentos', 'documentos', false, 52428800, array['application/pdf'])
+on conflict (id) do update
+  set public             = excluded.public,
+      file_size_limit    = excluded.file_size_limit,
+      allowed_mime_types = excluded.allowed_mime_types;
 
 -- Bloqueia sobrescrita e exclusão de objetos do bucket 'documentos'.
 -- O service role ignora RLS, então a garantia é por trigger e não por policy. O pipeline envia

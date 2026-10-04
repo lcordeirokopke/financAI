@@ -7,3 +7,4 @@ langgraph-checkpoint-postgres
 psycopg[binary]
 supabase
 python-dotenv
+httpx

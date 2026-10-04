@@ -1,0 +1,64 @@
+{
+  "success": true,
+  "data": {
+    "document_metas": [
+      {
+        "id": "9365d91a-0b46-45b9-8a7f-82a4e5cb4756",
+        "company_id": "5fd7b7d8-54a1-472d-8426-eb896ad8a3c4",
+        "file_name_original": "Release de Resultados - 1T26",
+        "file_url": "https://api.mziq.com/mzfilemanager/v2/d/5fd7b7d8-54a1-472d-8426-eb896ad8a3c4/a0d67048-7697-5926-f60a-23500d14d89c?origin=2",
+        "file_size": "3821388",
+        "file_date": "2026-05-07T00:00:00.000Z",
+        "file_quarter": 1,
+        "file_year": 2026,
+        "link_url": null,
+        "language_code": "pt_BR",
+        "is_published": true,
+        "file_published_date": "2026-05-07T00:00:00.000Z",
+        "file_title": "Release de Resultados - 1T26",
+        "download_link_id": "a0d67048-7697-5926-f60a-23500d14d89c",
+        "category_internal_name": "central_de_resultados_release_de_resultados",
+        "extension_file": null,
+        "permalink": "https://api.mziq.com/mzfilemanager/v2/d/5fd7b7d8-54a1-472d-8426-eb896ad8a3c4/a0d67048-7697-5926-f60a-23500d14d89c?origin=2"
+      },
+      {
+        "id": "c7a2499b-d9b3-46f1-ad86-c4195b75bb29",
+        "company_id": "5fd7b7d8-54a1-472d-8426-eb896ad8a3c4",
+        "file_name_original": "Release de Resultados - 2T26",
+        "file_url": "https://api.mziq.com/mzfilemanager/v2/d/5fd7b7d8-54a1-472d-8426-eb896ad8a3c4/b6643170-1686-52a1-2eda-a7817cf64c2d?origin=2",
+        "file_size": "4322083",
+        "file_date": "2026-08-11T00:00:00.000Z",
+        "file_quarter": 2,
+        "file_year": 2026,
+        "link_url": null,
+        "language_code": "pt_BR",
+        "is_published": true,
+        "file_published_date": "2026-08-11T00:00:00.000Z",
+        "file_title": "Release de Resultados - 2T26",
+        "download_link_id": "b6643170-1686-52a1-2eda-a7817cf64c2d",
+        "category_internal_name": "central_de_resultados_release_de_resultados",
+        "extension_file": null,
+        "permalink": "https://api.mziq.com/mzfilemanager/v2/d/5fd7b7d8-54a1-472d-8426-eb896ad8a3c4/b6643170-1686-52a1-2eda-a7817cf64c2d?origin=2"
+      },
+      {
+        "id": "988606c1-c4cf-4b64-b172-960a7a218c99",
+        "company_id": "5fd7b7d8-54a1-472d-8426-eb896ad8a3c4",
+        "file_name_original": "Release de Resultados - 4T25",
+        "file_url": "https://api.mziq.com/mzfilemanager/v2/d/5fd7b7d8-54a1-472d-8426-eb896ad8a3c4/5b4d2e02-2821-7c6a-9920-d5fe21dc4fed?origin=2",
+        "file_size": "3673830",
+        "file_date": "2025-12-31T00:00:00.000Z",
+        "file_quarter": 4,
+        "file_year": 2025,
+        "link_url": null,
+        "language_code": "pt_BR",
+        "is_published": true,
+        "file_published_date": "2026-02-26T00:00:00.000Z",
+        "file_title": "Release de Resultados - 4T25",
+        "download_link_id": "5b4d2e02-2821-7c6a-9920-d5fe21dc4fed",
+        "category_internal_name": "central_de_resultados_release_de_resultados",
+        "extension_file": null,
+        "permalink": "https://api.mziq.com/mzfilemanager/v2/d/5fd7b7d8-54a1-472d-8426-eb896ad8a3c4/5b4d2e02-2821-7c6a-9920-d5fe21dc4fed?origin=2"
+      }
+    ]
+  }
+}
