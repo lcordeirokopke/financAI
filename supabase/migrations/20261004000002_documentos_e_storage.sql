@@ -39,9 +39,9 @@ create table coletas (
 
 comment on column coletas.doc_id is 'Identificador legível, ex: copom_ata_273. Mesmo doc_id com hash diferente = republicação.';
 comment on column coletas.url_origem is 'URL de onde vieram os bytes do PDF, não a da página de listagem.';
--- PENDENTE: doc_id da CVM (cvm_fato_relevante_<Codigo_CVM>_<numProtocolo>) muda a cada versão do
--- documento, porque a CVM gera numProtocolo novo; e doc_id da B3 (b3_release_<ano>_<trimestre>T)
--- não confirmado (docs/fluxos/ingestao.md, Pendências).
+-- Formato do doc_id por fonte: docs/fluxos/ingestao.md, Identificação do documento.
+-- copom_ata_<reunião>, cvm_fato_relevante_<Codigo_CVM>_<numProtocolo>, b3_release_<ano>_<trimestre>T.
+-- Na CVM cada versão de um fato relevante tem numProtocolo próprio, e portanto doc_id próprio.
 
 create index coletas_doc_sha256_idx on coletas (doc_sha256);
 create index coletas_doc_id_idx on coletas (doc_id);

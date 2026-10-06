@@ -1,9 +1,12 @@
 """Única porta de gravação: Supabase (tabelas e Storage) e cópia local em data/.
 
-Por enquanto só as funções da E0 (docs/fluxos/ingestao.md):
+Funções da E0 e do run (docs/fluxos/ingestao.md, docs/arquiteturas.md):
 - envio do PDF ao bucket `documentos`, sem upsert;
 - transação de `documentos`, `coletas` e vínculo em `runs`, com releitura de `runs.coleta_id`;
-- cópia local em data/sources/<fonte>/.
+- registro do documento de referência do modo --dev, sem coleta;
+- criação e fechamento da linha de `runs`, e o manifest.json local;
+- cópia local em data/sources/<fonte>/ e data/runs/<run_id>/;
+- conexão do checkpointer do LangGraph.
 
 As funções recebem o repositório (Supabase ou, nos testes, em memória) e a pasta raiz de dados
 por parâmetro.
@@ -12,13 +15,14 @@ por parâmetro.
 import json
 import os
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Mapping, Protocol
 
-from sunontent.retentativa import FalhaRetriavel, FalhaTerminal, com_retentativa
-from sunontent.schemas import DocumentoFonte
+from sunontent.retentativa import Falha, FalhaRetriavel, FalhaTerminal, com_retentativa
+from sunontent.schemas import DocumentoFonte, RunManifest
 
 BUCKET_DOCUMENTOS = "documentos"
 
@@ -63,6 +67,36 @@ class Repositorio(Protocol):
 
     def coleta_do_run(self, run_id: str) -> Coleta | None:
         """Coleta já vinculada ao run, ou None se `runs.coleta_id` está vazio."""
+        ...
+
+    def registrar_documento_referencia(
+        self,
+        *,
+        run_id: str,
+        fonte: str,
+        tipo_documento: str,
+        doc_sha256: str,
+        tamanho_bytes: int,
+        doc_id: str,
+        url_origem: str,
+        coletado_em: datetime,
+    ) -> None:
+        """Modo --dev, numa transação: documentos (sem efeito se o hash existe) e o vínculo em runs, sem coleta."""
+        ...
+
+    def criar_run(self, manifest: RunManifest) -> None:
+        """Insere a linha de `runs` com status em_andamento. Sem efeito se o run_id já existe."""
+        ...
+
+    def concluir_run(self, run_id: str) -> None:
+        """status = concluido, só se o run está em_andamento."""
+        ...
+
+    def abortar_run(self, run_id: str, erro_classe: str, erro_mensagem: str) -> None:
+        """status = abortado com a classe e a mensagem do erro, só se o run está em_andamento.
+
+        Não toca nos campos de documento. Run já concluído ou abortado fica como está.
+        """
         ...
 
 
@@ -122,6 +156,82 @@ def registrar_coleta(
         f"transação da coleta do run {run_id}",
         antes_de_repetir=reler,
     )
+
+
+def registrar_documento_referencia(
+    repositorio: Repositorio,
+    *,
+    run_id: str,
+    fonte: str,
+    tipo_documento: str,
+    doc_sha256: str,
+    tamanho_bytes: int,
+    doc_id: str,
+    url_origem: str,
+    coletado_em: datetime,
+) -> None:
+    """Registra o documento de referência em `documentos` e o vincula ao run, sem criar coleta."""
+    com_retentativa(
+        lambda: repositorio.registrar_documento_referencia(
+            run_id=run_id,
+            fonte=fonte,
+            tipo_documento=tipo_documento,
+            doc_sha256=doc_sha256,
+            tamanho_bytes=tamanho_bytes,
+            doc_id=doc_id,
+            url_origem=url_origem,
+            coletado_em=coletado_em,
+        ),
+        f"registro do documento de referência do run {run_id}",
+    )
+
+
+def criar_run(repositorio: Repositorio, manifest: RunManifest) -> None:
+    com_retentativa(lambda: repositorio.criar_run(manifest), f"criação do run {manifest.run_id}")
+
+
+def concluir_run(repositorio: Repositorio, raiz_dados: Path, manifest: RunManifest) -> None:
+    """Grava o run como concluído no Supabase e, depois, no manifest.json local."""
+    com_retentativa(lambda: repositorio.concluir_run(manifest.run_id), f"conclusão do run {manifest.run_id}")
+    gravar_manifest_local(raiz_dados, manifest, "concluido")
+
+
+def abortar_run(
+    repositorio: Repositorio, raiz_dados: Path, manifest: RunManifest, classe: str, mensagem: str
+) -> None:
+    """Registra o run como abortado no Supabase e no manifest.json local.
+
+    Se o Supabase não aceitar o update (retentativas esgotadas), o erro fica só no manifest.json e
+    a linha do run segue em_andamento (docs/fluxos/ingestao.md, Classificação de erros). Essa falha
+    de gravação não é levantada, para não esconder o erro original.
+    """
+    mensagem = mensagem or "sem mensagem"
+    status, texto = "abortado", mensagem
+    try:
+        com_retentativa(
+            lambda: repositorio.abortar_run(manifest.run_id, classe, mensagem),
+            f"registro do aborto do run {manifest.run_id}",
+        )
+    except Falha as falha:
+        status = "em_andamento"
+        texto = f"{mensagem} (status não gravado no Supabase: {falha.mensagem})"
+    gravar_manifest_local(raiz_dados, manifest, status, classe, texto)
+
+
+def gravar_manifest_local(
+    raiz_dados: Path,
+    manifest: RunManifest,
+    status: str,
+    erro_classe: str | None = None,
+    erro_mensagem: str | None = None,
+) -> Path:
+    """Grava data/runs/<run_id>/manifest.json: o RunManifest, o status e o erro do run."""
+    conteudo = manifest.model_dump(mode="json")
+    conteudo.update(status=status, erro_classe=erro_classe, erro_mensagem=erro_mensagem)
+    destino = Path(raiz_dados) / "runs" / manifest.run_id / "manifest.json"
+    texto = json.dumps(conteudo, ensure_ascii=False, indent=2) + "\n"
+    _gravar_atomico(destino, texto.encode("utf-8"))
+    return destino
 
 
 def _pasta_fonte(raiz_dados: Path, fonte: str) -> Path:
@@ -285,6 +395,131 @@ class RepositorioSupabase:
             return Coleta(*linha) if linha else None
 
         return self._executar(consulta)
+
+    def registrar_documento_referencia(
+        self,
+        *,
+        run_id: str,
+        fonte: str,
+        tipo_documento: str,
+        doc_sha256: str,
+        tamanho_bytes: int,
+        doc_id: str,
+        url_origem: str,
+        coletado_em: datetime,
+    ) -> None:
+        def transacao(conexao):
+            with conexao.transaction():
+                conexao.execute(
+                    "insert into documentos (doc_sha256, fonte, tipo_documento, storage_path, tamanho_bytes)"
+                    " values (%s, %s, %s, %s, %s) on conflict (doc_sha256) do nothing",
+                    (doc_sha256, fonte, tipo_documento, caminho_storage(fonte, doc_sha256), tamanho_bytes),
+                )
+                vinculo = conexao.execute(
+                    "update runs set doc_id = %s, doc_sha256 = %s, url_origem = %s, coletado_em = %s"
+                    " where run_id = %s and (doc_sha256 is null or (doc_sha256 = %s and doc_id = %s))",
+                    (doc_id, doc_sha256, url_origem, coletado_em, run_id, doc_sha256, doc_id),
+                )
+                if vinculo.rowcount != 1:
+                    raise FalhaTerminal(
+                        f"run {run_id} não existe em runs ou já está vinculado a outro documento"
+                    )
+
+        self._executar(transacao)
+
+    def criar_run(self, manifest: RunManifest) -> None:
+        from psycopg.types.json import Jsonb
+
+        def insercao(conexao):
+            conexao.execute(
+                'insert into runs (run_id, "timestamp", modo, fonte, modelos, prompts, level_specs,'
+                ' glossario_versao, arquivos_sha256, "K") values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)'
+                " on conflict (run_id) do nothing",
+                (
+                    manifest.run_id,
+                    manifest.timestamp,
+                    manifest.modo,
+                    manifest.fonte,
+                    Jsonb(manifest.modelos),
+                    Jsonb(manifest.prompts),
+                    Jsonb(manifest.level_specs),
+                    manifest.glossario_versao,
+                    Jsonb(manifest.arquivos_sha256),
+                    manifest.K,
+                ),
+            )
+
+        self._executar(insercao)
+
+    def concluir_run(self, run_id: str) -> None:
+        def atualizacao(conexao):
+            alterado = conexao.execute(
+                "update runs set status = 'concluido' where run_id = %s and status = 'em_andamento'",
+                (run_id,),
+            )
+            if alterado.rowcount != 1:
+                raise FalhaTerminal(f"run {run_id} não existe em runs ou não está em_andamento")
+
+        self._executar(atualizacao)
+
+    def abortar_run(self, run_id: str, erro_classe: str, erro_mensagem: str) -> None:
+        def atualizacao(conexao):
+            conexao.execute(
+                "update runs set status = 'abortado', erro_classe = %s, erro_mensagem = %s"
+                " where run_id = %s and status = 'em_andamento'",
+                (erro_classe, erro_mensagem, run_id),
+            )
+
+        self._executar(atualizacao)
+
+    def verificar_conexao(self) -> None:
+        """Confere, sem retentativa, que o banco aceita a conexão."""
+        self._executar(lambda conexao: conexao.execute("select 1"))
+
+
+VARIAVEIS_SUPABASE = ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_DB_URL")
+
+
+def conferir_credenciais(ambiente: Mapping[str, str]) -> None:
+    ausentes = [nome for nome in VARIAVEIS_SUPABASE if not ambiente.get(nome)]
+    if ausentes:
+        raise FalhaTerminal(
+            f"credenciais do Supabase ausentes: {', '.join(ausentes)}. "
+            "Preencha o .env a partir do .env.example."
+        )
+
+
+def criar_repositorio_supabase(ambiente: Mapping[str, str]) -> RepositorioSupabase:
+    """Confere as credenciais, cria o cliente do Supabase e testa a conexão com o banco."""
+    conferir_credenciais(ambiente)
+    from supabase import create_client
+
+    cliente = create_client(ambiente["SUPABASE_URL"], ambiente["SUPABASE_SERVICE_ROLE_KEY"])
+    repositorio = RepositorioSupabase(cliente, ambiente["SUPABASE_DB_URL"])
+    repositorio.verificar_conexao()
+    return repositorio
+
+
+@contextmanager
+def checkpointer_postgres(db_url: str):
+    """PostgresSaver no schema `langgraph`, em conexão própria (docs/arquiteturas.md, Granularidade do checkpoint)."""
+    import psycopg
+    from langgraph.checkpoint.postgres import PostgresSaver
+    from psycopg.rows import dict_row
+
+    try:
+        with psycopg.connect(
+            db_url,
+            autocommit=True,
+            row_factory=dict_row,
+            options="-c search_path=langgraph",
+            connect_timeout=10,
+        ) as conexao:
+            saver = PostgresSaver(conexao)
+            saver.setup()
+            yield saver
+    except psycopg.Error as erro:
+        raise FalhaTerminal(f"checkpointer: banco recusou a conexão ou o setup: {erro}") from erro
 
 
 def _status_storage(erro: Exception) -> tuple[int | None, str]:

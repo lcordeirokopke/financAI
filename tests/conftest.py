@@ -106,6 +106,37 @@ class RepositorioMemoria:
         run = self.runs.get(run_id, {})
         return run.get("coleta")
 
+    def registrar_documento_referencia(self, *, run_id, fonte, tipo_documento, doc_sha256,
+                                       tamanho_bytes, doc_id, url_origem, coletado_em: datetime) -> None:
+        self._entrar("registrar_documento_referencia")
+        run = self.runs.get(run_id)
+        if run is None or run.get("doc_sha256") not in (None, doc_sha256):
+            raise FalhaTerminal(f"run {run_id} não existe em runs ou já está vinculado a outro documento")
+        self.documentos.setdefault(
+            doc_sha256,
+            {"fonte": fonte, "tipo_documento": tipo_documento,
+             "storage_path": f"{fonte}/{doc_sha256}.pdf", "tamanho_bytes": tamanho_bytes},
+        )
+        run.update(doc_id=doc_id, doc_sha256=doc_sha256, url_origem=url_origem, coletado_em=coletado_em)
+
+    def criar_run(self, manifest) -> None:
+        self._entrar("criar_run")
+        self.runs.setdefault(manifest.run_id, {"coleta_id": None, "manifest": manifest,
+                                               "status": "em_andamento"})
+
+    def concluir_run(self, run_id) -> None:
+        self._entrar("concluir_run")
+        run = self.runs.get(run_id)
+        if run is None or run["status"] != "em_andamento":
+            raise FalhaTerminal(f"run {run_id} não existe em runs ou não está em_andamento")
+        run["status"] = "concluido"
+
+    def abortar_run(self, run_id, erro_classe, erro_mensagem) -> None:
+        self._entrar("abortar_run")
+        run = self.runs.get(run_id)
+        if run is not None and run["status"] == "em_andamento":
+            run.update(status="abortado", erro_classe=erro_classe, erro_mensagem=erro_mensagem)
+
 
 @pytest.fixture
 def repositorio():

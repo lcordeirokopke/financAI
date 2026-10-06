@@ -1,0 +1,245 @@
+"""Testes do manifest, do grafo e do __main__: repositório em memória, checkpointer em memória e tmp_path."""
+
+import hashlib
+import json
+import re
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+from langgraph.checkpoint.memory import InMemorySaver
+
+from conftest import RepositorioMemoria
+from sunontent import __main__ as principal
+from sunontent import graph, manifesto, persistencia
+from sunontent.retentativa import FalhaRetriavel, FalhaTerminal
+from test_ingestao import cliente, listagem
+
+RAIZ = Path(__file__).resolve().parent.parent
+MOMENTO = datetime(2026, 10, 6, 15, 0, 0, tzinfo=timezone.utc)
+PDF = b"%PDF-1.7\n% referencia de teste\n%%EOF\n"
+
+
+@pytest.fixture
+def raiz(tmp_path):
+    """Cópia de config/ e prompts/ e uma referência do Copom, tudo em tmp_path."""
+    shutil.copytree(RAIZ / "config", tmp_path / "config")
+    shutil.copytree(RAIZ / "prompts", tmp_path / "prompts")
+    pasta = tmp_path / "tests" / "fixtures" / "referencia"
+    pasta.mkdir(parents=True)
+    (pasta / "copom.pdf").write_bytes(PDF)
+    (pasta / "copom.json").write_text(json.dumps({
+        "doc_id": "copom_ata_281",
+        "doc_sha256": hashlib.sha256(PDF).hexdigest(),
+        "url_origem": "https://exemplo/copom.pdf",
+        "coletado_em": "2026-10-03T17:22:05Z",
+    }), encoding="utf-8")
+    return tmp_path
+
+
+@pytest.fixture
+def repo():
+    return RepositorioMemoria()
+
+
+def rodar(raiz, repo, *, dev, http=None):
+    return principal.executar(
+        "copom", dev=dev, repositorio=repo, checkpointer=InMemorySaver(), raiz=raiz,
+        cliente_http=http, relogio=lambda: MOMENTO,
+    )
+
+
+def manifest_local(raiz):
+    (arquivo,) = (raiz / "data" / "runs").glob("*/manifest.json")
+    return json.loads(arquivo.read_text(encoding="utf-8"))
+
+
+# Manifest
+
+
+def test_manifest_le_versoes_e_hashes_da_config(raiz):
+    m = manifesto.montar(raiz, run_id="copom_20261006T150000Z_aaaaaa", timestamp=MOMENTO,
+                         modo="normal", fonte="copom", k=2)
+    assert m.level_specs == {"iniciante": 1, "intermediario": 1, "avancado": 1}
+    assert m.glossario_versao == 1
+    assert m.prompts == {}  # templates vazios ficam de fora
+    assert set(m.arquivos_sha256) == {
+        "config/models.yaml", "config/glossario.yaml",
+        "config/levels/iniciante.yaml", "config/levels/intermediario.yaml", "config/levels/avancado.yaml",
+    }
+
+
+def test_hash_ignora_fim_de_linha(raiz):
+    def montar():
+        return manifesto.montar(raiz, run_id="x", timestamp=MOMENTO, modo="normal", fonte="copom", k=2)
+
+    antes = montar().arquivos_sha256["config/glossario.yaml"]
+    (raiz / "config" / "glossario.yaml").write_bytes(b"versao: 1\r\n")
+    assert montar().arquivos_sha256["config/glossario.yaml"] == antes
+
+
+def test_template_com_conteudo_exige_cabecalho_de_versao(raiz):
+    (raiz / "prompts" / "adapter.j2").write_text("sem cabecalho", encoding="utf-8")
+    with pytest.raises(FalhaTerminal, match="prompts/adapter.j2"):
+        manifesto.montar(raiz, run_id="x", timestamp=MOMENTO, modo="normal", fonte="copom", k=2)
+
+
+def test_template_com_cabecalho_entra_no_manifest(raiz):
+    (raiz / "prompts" / "adapter.j2").write_text("{# versao: 3 #}\nolá", encoding="utf-8")
+    m = manifesto.montar(raiz, run_id="x", timestamp=MOMENTO, modo="normal", fonte="copom", k=2)
+    assert m.prompts == {"adapter": 3}
+    assert "prompts/adapter.j2" in m.arquivos_sha256
+
+
+def test_yaml_vazio_aponta_o_arquivo(raiz):
+    (raiz / "config" / "levels" / "avancado.yaml").write_text("", encoding="utf-8")
+    with pytest.raises(FalhaTerminal, match="config/levels/avancado.yaml"):
+        manifesto.montar(raiz, run_id="x", timestamp=MOMENTO, modo="normal", fonte="copom", k=2)
+
+
+# Grafo
+
+
+def test_entrada_escolhida_pelo_modo():
+    class E:  # só precisa de manifest.modo
+        def __init__(self, modo):
+            self.manifest = type("M", (), {"modo": modo})()
+
+    assert graph.escolher_entrada(E("dev")) == "referencia"
+    assert graph.escolher_entrada(E("normal")) == "coleta"
+
+
+# __main__: modo normal
+
+
+def test_modo_normal_conclui_e_grava_run_e_manifest(raiz, repo):
+    codigo = rodar(raiz, repo, dev=False, http=cliente(listagem("copom"), fonte="copom"))
+    assert codigo == 0
+    (run_id, run), = repo.runs.items()
+    assert re.fullmatch(r"copom_20261006T150000Z_[0-9a-f]{6}", run_id)
+    assert run["status"] == "concluido" and run["coleta_id"] == 1
+    local = manifest_local(raiz)
+    assert local["status"] == "concluido" and local["modo"] == "normal"
+    assert local["doc_id"] == "copom_ata_281" and local["coleta_id"] == 1
+    assert local["K"] == graph.K
+    assert (raiz / "data" / "sources" / "copom").exists()
+
+
+def test_falha_da_coleta_aborta_o_run(raiz, repo):
+    http = cliente({})  # tudo 404
+    assert rodar(raiz, repo, dev=False, http=http) == 1
+    (run,) = repo.runs.values()
+    assert run["status"] == "abortado" and run["erro_classe"] == "terminal"
+    assert "404" in run["erro_mensagem"]
+    assert run.get("doc_sha256") is None  # campos de documento intocados
+    local = manifest_local(raiz)
+    assert local["status"] == "abortado"
+    assert local["erro_classe"] == "terminal" and local["erro_mensagem"] == run["erro_mensagem"]
+    assert not repo.documentos and not repo.coletas
+
+
+def test_falha_terminal_levantada_pelo_no_aborta_com_classe_e_mensagem(raiz, repo, monkeypatch):
+    def no_que_falha(state, config):
+        raise FalhaTerminal("E0 falhou de propósito")
+
+    monkeypatch.setattr(graph, "coleta", no_que_falha)
+    assert rodar(raiz, repo, dev=False, http=cliente({})) == 1
+    (run,) = repo.runs.values()
+    assert (run["status"], run["erro_classe"], run["erro_mensagem"]) == (
+        "abortado", "terminal", "E0 falhou de propósito")
+    assert manifest_local(raiz)["erro_mensagem"] == "E0 falhou de propósito"
+
+
+def test_erro_inesperado_fecha_o_run_e_propaga(raiz, repo, monkeypatch):
+    def quebra(*a, **k):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(graph, "coleta", quebra)
+    with pytest.raises(RuntimeError):
+        rodar(raiz, repo, dev=False, http=cliente({}))
+    (run,) = repo.runs.values()
+    assert (run["status"], run["erro_classe"], run["erro_mensagem"]) == (
+        "abortado", "terminal", "RuntimeError: bug")
+
+
+# __main__: modo --dev
+
+
+def test_modo_dev_usa_a_referencia_sem_baixar_nem_criar_coleta(raiz, repo):
+    assert rodar(raiz, repo, dev=True) == 0
+    (run,) = repo.runs.values()
+    assert run["status"] == "concluido" and run["coleta_id"] is None
+    assert run["doc_id"] == "copom_ata_281"
+    assert not repo.coletas
+    assert len(repo.documentos) == 1 and len(repo.objetos) == 1
+    assert manifest_local(raiz)["modo"] == "dev"
+    assert not (raiz / "data" / "sources").exists()
+
+
+def test_modo_dev_sem_referencia_para_com_mensagem_clara(raiz, repo):
+    (raiz / "tests" / "fixtures" / "referencia" / "copom.pdf").unlink()
+    assert rodar(raiz, repo, dev=True) == 1
+    (run,) = repo.runs.values()
+    assert run["status"] == "abortado" and "copom.pdf" in run["erro_mensagem"]
+    assert not repo.objetos
+
+
+def test_modo_dev_com_hash_diferente_para_com_hashes(raiz, repo):
+    (raiz / "tests" / "fixtures" / "referencia" / "copom.pdf").write_bytes(PDF + b"x")
+    assert rodar(raiz, repo, dev=True) == 1
+    (run,) = repo.runs.values()
+    esperado = hashlib.sha256(PDF).hexdigest()
+    assert esperado in run["erro_mensagem"]
+    assert hashlib.sha256(PDF + b"x").hexdigest() in run["erro_mensagem"]
+    assert not repo.objetos
+
+
+# Falhas antes e depois do run existir
+
+
+def test_config_invalida_nao_cria_linha_em_runs(raiz, repo):
+    (raiz / "config" / "models.yaml").write_text("", encoding="utf-8")
+    with pytest.raises(FalhaTerminal, match="models.yaml"):
+        rodar(raiz, repo, dev=True)
+    assert not repo.runs and not (raiz / "data").exists()
+
+
+def test_supabase_fora_no_aborto_deixa_o_erro_so_no_manifest_local(raiz, repo, capsys):
+    (raiz / "tests" / "fixtures" / "referencia" / "copom.pdf").unlink()  # o --dev vai abortar
+    repo.falhas["abortar_run"] = [FalhaRetriavel("fora")] * 10
+    assert rodar(raiz, repo, dev=True) == 1  # sem nova exceção escondendo a original
+    (run,) = repo.runs.values()
+    assert run["status"] == "em_andamento" and "erro_classe" not in run
+    local = manifest_local(raiz)
+    assert local["status"] == "em_andamento" and local["erro_classe"] == "terminal"
+    assert "copom.pdf" in local["erro_mensagem"] and "não gravado no Supabase" in local["erro_mensagem"]
+    assert "copom.pdf" in capsys.readouterr().err
+
+
+def test_run_concluido_nao_e_sobrescrito_pelo_aborto(raiz, repo):
+    assert rodar(raiz, repo, dev=True) == 0
+    (run_id, run), = repo.runs.items()
+    manifest = run["manifest"]
+    persistencia.abortar_run(repo, raiz / "data", manifest, "terminal", "tarde demais")
+    assert run["status"] == "concluido" and "erro_classe" not in run
+
+
+def test_run_abortado_mantem_a_primeira_mensagem(raiz, repo):
+    (raiz / "tests" / "fixtures" / "referencia" / "copom.pdf").unlink()
+    rodar(raiz, repo, dev=True)
+    (run,) = repo.runs.values()
+    primeira = run["erro_mensagem"]
+    persistencia.abortar_run(repo, raiz / "data", run["manifest"], "terminal", "outra")
+    assert run["erro_mensagem"] == primeira
+
+
+def test_credenciais_ausentes_param_antes_de_tudo():
+    with pytest.raises(FalhaTerminal, match="SUPABASE_URL.*SUPABASE_SERVICE_ROLE_KEY.*SUPABASE_DB_URL"):
+        principal.persistencia.conferir_credenciais({})
+
+
+def test_cli_recusa_fonte_desconhecida():
+    with pytest.raises(SystemExit):
+        principal._ler_parametros(["xyz"])
+    assert principal._ler_parametros(["cvm", "--dev"]).dev is True

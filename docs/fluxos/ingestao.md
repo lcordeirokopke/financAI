@@ -39,6 +39,8 @@ Como cada script localiza a publicação mais recente:
 | `sunontent/nodes/coleta.py`     | Nó fino da E0: chama o script da fonte escolhida em `ingestao/` e coloca o `DocumentoFonte` devolvido no estado.  |
 | `sunontent/nodes/referencia.py` | Nó fino da entrada do modo desenvolvimento: chama `ingestao/referencia.py` e coloca o `DocumentoFonte` devolvido no estado. |
 | `sunontent/ingestao/<fonte>.py` | Um script por fonte. Baixa, valida e calcula o hash, grava no Supabase (bucket `documentos`, `documentos`, `coletas` e o vínculo em `runs`), grava a cópia local em `data/sources/<fonte>/` (PDF e `.json` da coleta) e devolve um `DocumentoFonte`. |
+| `sunontent/ingestao/comum.py`   | Parte comum aos três scripts por fonte: cliente HTTP com `User-Agent`, download para a memória com o limite de 60 MiB, validação `%PDF-`, cálculo do `doc_sha256` e a ordem de gravação (Supabase, PDF local, `.json`). Cada script só localiza a publicação mais recente e monta o `doc_id`. |
+| `sunontent/retentativa.py`      | Classes de falha (retriável e terminal) e retentativa com backoff exponencial, usadas pelos scripts de `ingestao/` e por `persistencia.py`. |
 | `sunontent/ingestao/referencia.py` | Modo desenvolvimento: verifica se o documento e o `.json` de referência existem, lê os dois, confere o `doc_sha256`, registra o documento no Supabase se ainda não estiver lá e devolve um `DocumentoFonte`, o mesmo tipo do modo normal. |
 | `sunontent/schemas.py`          | Define o `DocumentoFonte`: contrato entre a E0 e a E1 nos dois modos (ver **Contrato de saída**).                      |
 | `data/sources/`                 | Cópia local dos documentos baixados, um PDF por `doc_sha256` e um `.json` por coleta, em `data/sources/<fonte>/`. Fora do git. A fonte da verdade é o Supabase.                                                                            |
@@ -172,7 +174,7 @@ Formato do `doc_id` por fonte:
 | CVM | `cvm_fato_relevante_<Codigo_CVM>_<numProtocolo>` | `cvm_fato_relevante_24708_1574050` |
 | B3 | `b3_release_<ano>_<trimestre>T` | `b3_release_2026_2T` |
 
-Os formatos da CVM e da B3 ainda têm pontos em aberto (ver **Pendências**).
+Na CVM, cada nova versão de um fato relevante recebe um `numProtocolo` próprio, e o conjunto de dados IPE não tem um identificador que se mantenha entre versões. Por isso, na CVM, uma republicação gera outro `doc_id`, e não o mesmo `doc_id` com outro hash: cada versão é tratada como uma publicação.
 
 ## Documento de referência
 
@@ -242,7 +244,7 @@ No modo desenvolvimento, documento, hash e metadados são fixos e versionados, e
 ## Testes
 
 - Nenhum teste acessa a internet nem o Supabase do site. As respostas HTTP das fontes são simuladas. A cópia local do Supabase CLI roda em `localhost` e não conta como internet.
-- Os testes de unidade usam um repositório em memória no lugar do Supabase, o checkpointer em memória do LangGraph e uma pasta temporária (`tmp_path`) no lugar de `data/`. Por isso as funções que persistem recebem por parâmetro o cliente do Supabase, o checkpointer e a pasta raiz de dados.
+- Os testes de unidade usam um repositório em memória no lugar do Supabase, o checkpointer em memória do LangGraph e uma pasta temporária (`tmp_path`) no lugar de `data/`. Por isso as funções que persistem recebem por parâmetro o que usam entre o cliente do Supabase (na E0, o repositório de `persistencia.py`), o checkpointer e a pasta raiz de dados, e nunca os criam por conta própria. A E0 não usa o checkpointer, porque não tem células.
 - Os testes de integração têm o marker `supabase`, usam a cópia local do Supabase CLI (`supabase start`) e são pulados quando ela não está no ar. Eles cobrem o que o repositório em memória não reproduz: constraints, triggers de imutabilidade e o bucket `documentos`. A limpeza entre testes é por `supabase db reset`, porque `TRUNCATE` é bloqueado nas tabelas imutáveis.
 - O `tests/conftest.py` interrompe o pytest antes da coleta se `SUPABASE_URL` ou `SUPABASE_DB_URL` apontarem para um host diferente de `localhost`, `127.0.0.1` ou `::1`.
 - `tests/fixtures/http/<fonte>/` guarda as respostas simuladas de cada fonte: a resposta que lista as publicações e a página de erro usada no teste de formato inválido. Timeout, erro de conexão e códigos HTTP são simulados no próprio teste, sem arquivo.
@@ -276,6 +278,4 @@ Todos os erros desta tabela vêm de `ingestao/` e acontecem sem existir célula 
 
 ## Pendências
 
-- `doc_id` da CVM: o `numProtocolo` muda a cada nova versão do mesmo fato relevante (`Versao` 1, 2, 3 têm protocolos diferentes), então uma republicação gera outro `doc_id`, e não o mesmo `doc_id` com outro hash. O conjunto de dados IPE não tem um identificador que se mantenha entre versões.
-- `doc_id` da B3: formato `b3_release_<ano>_<trimestre>T` ainda não confirmado.
 - Documentos de referência: `tests/fixtures/referencia/<fonte>.pdf`, `<fonte>.json` e `<fonte>.anotacao.yaml` ainda não foram congelados. Até lá, os testes da E0 que conferem `doc_sha256` e `doc_id` contra `<fonte>.json` são pulados, e o corpo do download simulado é um PDF substituto mínimo. As respostas de listagem em `tests/fixtures/http/<fonte>/` apontam para as publicações mais recentes na data da sua gravação: Copom ata 281, CVM `cvm_fato_relevante_24708_1574050` e B3 2T26.
