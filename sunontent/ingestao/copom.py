@@ -49,6 +49,7 @@ def coletar(
     cliente_http: httpx.Client,
     relogio=comum.agora_utc,
 ) -> DocumentoFonte:
+    comum.avisar(f"{FONTE}: localizando a ata mais recente")
     nro_reuniao, url_pdf = localizar_ultima(cliente_http)
     return comum.coletar_documento(
         cliente_http=cliente_http,

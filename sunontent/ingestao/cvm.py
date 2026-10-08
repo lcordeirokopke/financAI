@@ -95,6 +95,7 @@ def coletar(
     relogio=comum.agora_utc,
 ) -> DocumentoFonte:
     ano = relogio().year
+    comum.avisar(f"{FONTE}: localizando o fato relevante mais recente")
     codigo, protocolo, url_pdf = localizar_ultima(cliente_http, ano)
     return comum.coletar_documento(
         cliente_http=cliente_http,

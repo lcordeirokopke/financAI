@@ -5,6 +5,7 @@ Classes de falha: docs/fluxos/ingestao.md, Classificação de erros.
 """
 
 import random
+import sys
 import time
 from collections.abc import Callable
 from typing import TypeVar
@@ -62,7 +63,14 @@ def com_retentativa(
                 raise FalhaTerminal(
                     f"{descricao}: {tentativas} tentativas esgotadas. Última falha: {falha.mensagem}"
                 ) from falha
-            _dormir(espera(tentativa))
+            atraso = espera(tentativa)
+            print(
+                f"{descricao}: tentativa {tentativa} de {tentativas} falhou ({falha.mensagem});"
+                f" nova tentativa em {atraso:.0f}s",
+                file=sys.stderr,
+                flush=True,
+            )
+            _dormir(atraso)
             if antes_de_repetir is not None:
                 ja_feito = antes_de_repetir()
                 if ja_feito is not None:

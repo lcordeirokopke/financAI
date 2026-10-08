@@ -39,7 +39,7 @@ Como cada script localiza a publicação mais recente:
 | `sunontent/nodes/coleta.py`     | Nó fino da E0: chama o script da fonte escolhida em `ingestao/` e coloca o `DocumentoFonte` devolvido no estado.  |
 | `sunontent/nodes/referencia.py` | Nó fino da entrada do modo desenvolvimento: chama `ingestao/referencia.py` e coloca o `DocumentoFonte` devolvido no estado. |
 | `sunontent/ingestao/<fonte>.py` | Um script por fonte. Baixa, valida e calcula o hash, grava no Supabase (bucket `documentos`, `documentos`, `coletas` e o vínculo em `runs`), grava a cópia local em `data/sources/<fonte>/` (PDF e `.json` da coleta) e devolve um `DocumentoFonte`. |
-| `sunontent/ingestao/comum.py`   | Parte comum aos três scripts por fonte: cliente HTTP com `User-Agent`, download para a memória com o limite de 60 MiB, validação `%PDF-`, cálculo do `doc_sha256` e a ordem de gravação (Supabase, PDF local, `.json`). Cada script só localiza a publicação mais recente e monta o `doc_id`. |
+| `sunontent/ingestao/comum.py`   | Parte comum aos três scripts por fonte: cliente HTTP com `User-Agent`, download para a memória com o limite de 50 MiB, validação `%PDF-`, cálculo do `doc_sha256`, a ordem de gravação (Supabase, PDF local, `.json`) e as mensagens de progresso no terminal. Cada script só localiza a publicação mais recente e monta o `doc_id`. |
 | `sunontent/retentativa.py`      | Classes de falha (retriável e terminal) e retentativa com backoff exponencial, usadas pelos scripts de `ingestao/` e por `persistencia.py`. |
 | `sunontent/ingestao/referencia.py` | Modo desenvolvimento: verifica se o documento e o `.json` de referência existem, lê os dois, confere o `doc_sha256`, registra o documento no Supabase se ainda não estiver lá e devolve um `DocumentoFonte`, o mesmo tipo do modo normal. |
 | `sunontent/schemas.py`          | Define o `DocumentoFonte`: contrato entre a E0 e a E1 nos dois modos (ver **Contrato de saída**).                      |
@@ -233,7 +233,8 @@ No modo desenvolvimento, documento, hash e metadados são fixos e versionados, e
 ## Requisitos dos scripts de `ingestao/`
 
 - `User-Agent` definido explicitamente.
-- Retentativa com backoff exponencial para falhas de conexão, com a fonte e com o Supabase.
+- Retentativa com backoff exponencial para falhas de conexão, com a fonte e com o Supabase, e para conteúdo baixado que não é PDF. Cada nova tentativa é avisada no terminal.
+- Mostram o progresso no terminal: localização da publicação, início do download, megabytes baixados, gravação no Supabase e gravação da cópia local.
 - Baixam o documento inteiro para a memória, com limite de 50 MiB (52.428.800 bytes). Só gravam alguma coisa, no Supabase ou em disco, depois da validação de formato e do cálculo do `doc_sha256`.
 - Gravam primeiro no Supabase e só então a cópia local (o PDF e depois o `.json`). O PDF vai pela API do Storage; as linhas de `documentos`, `coletas` e `runs` vão numa única transação pela conexão Postgres (`SUPABASE_DB_URL`), por `sunontent/persistencia.py`.
 - Se a resposta da transação se perde, releem `runs.coleta_id` e só repetem a transação se ele estiver vazio.
@@ -266,7 +267,7 @@ tests/fixtures/
 | ------------------------------------------------------------------------------------------------------- | ---------- | ----------------------------------------------------------------------------------- |
 | Timeout, erro de conexão, HTTP 5xx, HTTP 429 no download da fonte | Retriável | Retentativa com backoff exponencial; esgotadas as tentativas, vira terminal. |
 | HTTP 404 ou publicação não localizada na página da fonte | Terminal | Aborta o run com mensagem indicando a fonte e a URL. |
-| Conteúdo baixado não corresponde ao formato esperado (ex: página de erro HTML no lugar do documento) | Terminal | Aborta o run sem enviar nada ao bucket nem gravar em `documentos`, `coletas` ou `data/sources/`. |
+| Conteúdo baixado não corresponde ao formato esperado (ex: página de erro HTML no lugar do documento) | Retriável | A fonte pode devolver uma página de erro temporária com HTTP 200, como o RAD da CVM. O download é repetido com backoff exponencial; esgotadas as tentativas, vira terminal e aborta o run sem enviar nada ao bucket nem gravar em `documentos`, `coletas` ou `data/sources/`. |
 | Documento baixado maior que 50 MiB (52.428.800 bytes) | Terminal | Aborta o run sem enviar nada ao bucket nem gravar em `documentos`, `coletas` ou `data/sources/`, com mensagem indicando a fonte, a URL e o tamanho. |
 | Timeout, erro de conexão ou HTTP 5xx ao gravar no Supabase (bucket ou banco) | Retriável | Retentativa com backoff exponencial; esgotadas as tentativas, vira terminal. Se nem o status do run puder ser gravado, o erro fica só em `data/runs/<run_id>/manifest.json` e a linha do run fica `em_andamento`. |
 | Gravação recusada pelo Supabase: upload recusado pelo bucket (HTTP 4xx que não seja "Asset Already Exists"), violação de constraint ou trigger de imutabilidade no banco | Terminal | Aborta o run com a resposta do Supabase. A transação é desfeita inteira: nenhuma linha em `documentos` nem em `coletas`. Um objeto já enviado ao bucket fica e é reaproveitado na próxima coleta. |

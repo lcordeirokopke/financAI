@@ -182,13 +182,46 @@ def test_user_agent_explicito(fonte, repositorio, run_id, tmp_path):
 
 
 @pytest.mark.parametrize("fonte", FONTES)
-def test_pagina_de_erro_no_lugar_do_pdf_aborta_sem_gravar(fonte, repositorio, run_id, tmp_path):
+def test_pagina_de_erro_persistente_aborta_sem_gravar(fonte, repositorio, run_id, tmp_path, sem_espera):
     erro = (HTTP / fonte / "erro.html").read_bytes()
     pdf = lambda req: httpx.Response(200, content=erro, headers={"Content-Type": "application/pdf"})
 
-    with pytest.raises(FalhaTerminal, match="não é PDF"):
+    with pytest.raises(FalhaTerminal, match=f"{TENTATIVAS} tentativas esgotadas.*não é PDF"):
         coletar(fonte, repositorio, run_id, tmp_path, cliente(listagem(fonte), pdf=pdf, fonte=fonte))
+    assert len(sem_espera) == TENTATIVAS - 1
     assert nada_gravado(repositorio, tmp_path)
+
+
+@pytest.mark.parametrize("fonte", FONTES)
+def test_pagina_de_erro_temporaria_e_repetida(fonte, repositorio, run_id, tmp_path, sem_espera, capsys):
+    erro = (HTTP / fonte / "erro.html").read_bytes()
+    pdf = sequencia(lambda req: httpx.Response(200, content=erro), pdf_ok(fonte))
+
+    doc = coletar(fonte, repositorio, run_id, tmp_path, cliente(listagem(fonte), pdf=pdf, fonte=fonte))
+    assert doc.doc_id == DOC_ID[fonte]
+    assert len(sem_espera) == 1
+    assert "tentativa 1 de 4 falhou" in capsys.readouterr().err
+
+
+def test_progresso_aparece_no_terminal(repositorio, run_id, tmp_path, capsys):
+    def blocos():  # como na rede: o corpo chega em pedaços
+        yield b"%PDF-"
+        for _ in range(8):
+            yield b"0" * (256 * 1024)
+
+    pdf = lambda req: httpx.Response(200, content=blocos())
+    coletar("copom", repositorio, run_id, tmp_path, cliente(listagem("copom"), pdf=pdf, fonte="copom"))
+    saida = capsys.readouterr().out
+    for trecho in (
+        "copom: localizando a ata mais recente",
+        f"copom: baixando copom_ata_281 de {URL_PDF['copom']}",
+        "copom: 1 MB baixados",
+        "copom: 2 MB baixados",
+        "copom: 2.0 MB baixados em",
+        "copom: gravando no Supabase",
+        "copom: gravando a cópia local em",
+    ):
+        assert trecho in saida
 
 
 def test_content_type_e_ignorado_so_os_primeiros_bytes_contam(repositorio, run_id, tmp_path):

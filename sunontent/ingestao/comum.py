@@ -2,13 +2,15 @@
 
 Ordem obrigatória (docs/fluxos/ingestao.md, Modo normal):
 1. baixa o documento inteiro para a memória, com limite de 50 MiB;
-2. valida o formato e calcula o doc_sha256; se falhar, nada é gravado;
+2. valida o formato e calcula o doc_sha256; se falhar, nada é gravado (conteúdo que não é PDF
+   é retriável: o download é repetido e, esgotadas as tentativas, vira terminal);
 3. grava no Supabase: bucket e depois a transação de documentos, coletas e runs;
 4. grava a cópia local: o PDF e depois o .json da coleta;
 5. devolve o DocumentoFonte.
 """
 
 import hashlib
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +26,12 @@ LIMITE_BYTES = 52_428_800  # 50 MiB, limite por arquivo do plano Free do Supabas
 ASSINATURA_PDF = b"%PDF-"
 USER_AGENT = "sunontent/0.1 (coleta de documentos financeiros publicos)"
 TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+MIB = 1024 * 1024
+
+
+def avisar(mensagem: str) -> None:
+    """Progresso da coleta no terminal."""
+    print(mensagem, flush=True)
 
 
 class NaoEncontrado(FalhaTerminal):
@@ -72,7 +80,7 @@ def _requisitar(
     return com_retentativa(tentativa, f"{fonte}: requisição a {url}")
 
 
-def _ler_com_limite(fonte: str, resposta: httpx.Response) -> bytes:
+def _ler_com_limite(fonte: str, resposta: httpx.Response, progresso: bool = False) -> bytes:
     url = str(resposta.request.url)
     declarado = resposta.headers.get("Content-Length")
     if declarado is not None and declarado.isdigit() and int(declarado) > LIMITE_BYTES:
@@ -88,6 +96,8 @@ def _ler_com_limite(fonte: str, resposta: httpx.Response) -> bytes:
                 f"{fonte}: documento em {url} excede o limite de {LIMITE_BYTES} bytes"
                 f" (lidos {total} bytes até a interrupção)"
             )
+        if progresso and total // MIB > (total - len(parte)) // MIB:
+            avisar(f"{fonte}: {total // MIB} MB baixados")
         partes.append(parte)
     return b"".join(partes)
 
@@ -108,12 +118,26 @@ def baixar_json(cliente: httpx.Client, fonte: str, url: str, metodo: str = "GET"
 
 
 def validar_pdf(fonte: str, url: str, dados: bytes) -> None:
-    """O formato é decidido só pelos primeiros bytes; o Content-Type é ignorado."""
+    """O formato é decidido só pelos primeiros bytes; o Content-Type é ignorado.
+
+    Retriável: a fonte às vezes devolve uma página de erro temporária com HTTP 200.
+    """
     if not dados.startswith(ASSINATURA_PDF):
         inicio = dados[:40]
-        raise FalhaTerminal(
+        raise FalhaRetriavel(
             f"{fonte}: conteúdo baixado de {url} não é PDF (início: {inicio!r})"
         )
+
+
+def baixar_pdf(cliente: httpx.Client, fonte: str, url: str) -> bytes:
+    """Baixa e valida o PDF na mesma tentativa: página de erro no lugar do PDF repete o download."""
+
+    def ler_e_validar(resposta: httpx.Response) -> bytes:
+        dados = _ler_com_limite(fonte, resposta, progresso=True)
+        validar_pdf(fonte, url, dados)
+        return dados
+
+    return _requisitar(cliente, fonte, "GET", url, ler_e_validar)
 
 
 def sha256_hex(dados: bytes) -> str:
@@ -137,11 +161,17 @@ def coletar_documento(
     relogio: Callable[[], datetime] = agora_utc,
 ) -> DocumentoFonte:
     """Baixa o PDF, valida, grava no Supabase e na cópia local e devolve o DocumentoFonte."""
-    dados = baixar_bytes(cliente_http, fonte, url_pdf)
+    avisar(f"{fonte}: baixando {doc_id} de {url_pdf}")
+    inicio = time.monotonic()
+    dados = baixar_pdf(cliente_http, fonte, url_pdf)
     coletado_em = relogio()
-    validar_pdf(fonte, url_pdf, dados)
     doc_sha256 = sha256_hex(dados)
+    avisar(
+        f"{fonte}: {len(dados) / MIB:.1f} MB baixados em {time.monotonic() - inicio:.0f}s"
+        f" (doc_sha256 {doc_sha256[:12]})"
+    )
 
+    avisar(f"{fonte}: gravando no Supabase")
     persistencia.enviar_documento(repositorio, fonte, doc_sha256, dados)
     coleta = persistencia.registrar_coleta(
         repositorio,
@@ -155,6 +185,7 @@ def coletar_documento(
         coletado_em=coletado_em,
     )
 
+    avisar(f"{fonte}: gravando a cópia local em {Path(raiz_dados) / 'sources' / fonte}")
     caminho = persistencia.gravar_pdf_local(raiz_dados, fonte, doc_sha256, dados)
     documento = DocumentoFonte(
         caminho=caminho,
