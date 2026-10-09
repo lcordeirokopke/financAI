@@ -1,0 +1,88 @@
+# Leitura (E1)
+
+Este documento detalha a etapa E1: como o PDF entregue pela E0 vira texto limpo posicionado, chunks e a tabela de números. A arquitetura geral está em `docs/arquiteturas.md`.
+
+## Responsabilidade
+
+Recebe o `DocumentoFonte`, confere o SHA-256 dos bytes lidos contra `doc_sha256` e devolve um `DocumentoProcessado`. É determinística: zero LLM, zero token. Qualquer falha aborta o run com erro terminal, porque o texto limpo é a referência de todos os offsets do pipeline.
+
+## Módulos
+
+| Arquivo | Função |
+|---|---|
+| `sunontent/nodes/leitura.py` | Nó do grafo: chama `extracao/leitura.py`, grava a saída e a coloca no estado. |
+| `sunontent/extracao/leitura.py` | Orquestra: PDF, normalização, chunks, metadados e tabela de números. |
+| `sunontent/extracao/pdf.py` | Confere o hash, abre o PDF (pymupdf) e devolve as linhas de cada página com posição. |
+| `sunontent/extracao/normalizacao.py` | Cabeçalho e rodapé repetidos, número de página, hifenização, espaço. Gera o texto limpo. |
+| `sunontent/extracao/chunking.py` | Chunks por seção lógica. |
+| `sunontent/extracao/metadados.py` | Emissor e data do documento. |
+| `sunontent/numeros.py` | Parser de número brasileiro e varredura do texto. Também é usado pelas métricas. |
+| `sunontent/persistencia.py` | `gravar_documento_processado`: Supabase e cópia local. |
+
+## Leitura do PDF
+
+O pymupdf decide onde há espaço pela distância entre caracteres, o que gera `202 6` e `R $1,3` em PDFs exportados com texto justificado. A E1 lê com `TEXT_INHIBIT_SPACES`: só existe espaço onde o PDF tem um caractere de espaço.
+
+Esses PDFs também partem números em fragmentos sem espaço entre eles (`R$31` e `5,2` são `R$315,2`) e, às vezes, quebram a linha no meio do número (`R$1` e `.701,2`). A E1 une os fragmentos que ficam na mesma linha base, no mesmo bloco, sem espaço na fronteira, e só quando os dois lados formam um mesmo token:
+
+- dígito com dígito, vírgula, ponto, `%` ou hífen;
+- vírgula ou ponto seguido de dígito, e `$` seguido de dígito;
+- letra com letra minúscula (palavra partida) ou com pontuação;
+- `(` seguido de letra ou dígito.
+
+Rótulo de tabela seguido de valor (`Receita total` e `3.081,4`), `)` seguido de dígito e letra maiúscula colada não se unem. A distância horizontal não entra na regra, porque nesses PDFs a posição do texto não acompanha o desenho. A quebra de linha no meio de número só é desfeita quando a linha termina em dígito e a seguinte começa com `.` ou `,` seguido de dígito, ou quando a linha termina em dígito e vírgula e a seguinte começa com dígito.
+
+Erros terminais: arquivo ausente, SHA-256 diferente (a mensagem traz o arquivo, o hash esperado e o encontrado, e pede para apagar o arquivo local), PDF que não abre, PDF com senha e página sem camada de texto. O OCR ainda não existe, e a coluna `ocr` de `documento_paginas` fica sempre `false`.
+
+## Normalização
+
+- Ligaduras viram letras, espaço sem quebra vira espaço, caracteres de largura zero e hífen opcional saem, e o espaço é colapsado.
+- Cabeçalho e rodapé: linhas na margem da página (12% da altura, em cima e embaixo) que se repetem em pelo menos metade das páginas, em documentos de 3 páginas ou mais. Em linha com letras, os dígitos são mascarados na comparação (`Relatório 3`); linha só de número é comparada pelo valor. Número de página isolado (`3`, `Página 3 de 9`) sai da margem em qualquer documento, mas só se for o número da página, descontado o deslocamento da numeração (a capa pode não ser contada). Um número na margem que não é o da página, como uma célula de tabela no pé da página, é mantido.
+- Palavra hifenizada: linha que termina em letra e hífen, seguida de linha que começa em minúscula, é juntada sem o hífen.
+- As linhas do PDF são mantidas: o texto limpo de cada página é o das linhas separadas por `\n`.
+
+A página é 1-indexada, e o offset é de caractere no texto limpo da página, começando em 0, com fim exclusivo.
+
+## Chunks
+
+Por seção lógica, cobrindo o texto inteiro sem sobreposição. O texto antes da primeira fronteira vira o primeiro chunk, com `secao` vazia. `chunk_id` é `K01`, `K02`, e assim por diante.
+
+| Documento | Fronteira | `secao` |
+|---|---|---|
+| Ata do Copom | Parágrafo numerado, só na sequência 1, 2, 3... do documento | Título `A)`, `B)`, `C)` ou `D)` vigente. O título e o primeiro parágrafo da seção formam um chunk só. |
+| Release da B3 | Linha em maiúsculas, sem dígitos, com 8 caracteres ou mais | O título. Títulos seguidos formam um só. |
+| Fato relevante da CVM | Nenhuma | Vazia. O documento todo é um chunk. |
+
+Subseções da B3 em caixa mista ficam dentro do chunk da seção maior. O `Chunk.texto` é o texto limpo do intervalo: página inicial a partir de `offset_inicio`, páginas do meio inteiras e página final até `offset_fim`, unidas por `\n`. O embedding fica nulo na E1.
+
+## Metadados
+
+Sem LLM, por regra do texto limpo.
+
+| Fonte | Emissor | Data do documento |
+|---|---|---|
+| Copom | Texto fixo do Comitê de Política Monetária do Banco Central | Último dia da reunião (`15 e 16 de setembro de 2026` é 2026-09-16) |
+| CVM | Primeira linha da primeira página | Linha de assinatura (`Rio de Janeiro, 02 de outubro de 2026.`) |
+| B3 | Texto fixo da B3 S.A. | Data-base do balanço (`CONSOLIDADO EM 30/06/2026`) |
+
+Se o padrão não for encontrado, o run aborta com erro terminal.
+
+## Tabela de números
+
+`numeros.varrer` percorre o texto limpo de cada página. O `bruto` é o trecho exato, com a unidade, e a âncora aponta para ele.
+
+- Ponto separa milhar e vírgula separa decimal. Valor em `Decimal`, nunca `float`.
+- Formato fora disso (`1,234.56`, `12.5%`, `1.93`, `3.1`, `0.500`, `1,2,3`) levanta erro e aborta o run, indicando a página e o trecho. O parser não adivinha.
+- `pct`: `%` ou `por cento`. `pp`: `p.p.`, `pp` ou `pontos percentuais`; `bps` e `pontos-base` também viram `pp` (1 bp é 0,01 p.p.).
+- `BRL`: `R$` sem escala. `BRL_mi`: `R$` com `mil`, `milhão`, `bilhão` ou `trilhão`, normalizado para milhões. `R$5,15/US$` (cotação) é um `BRL`. Outra quantia em dólar ou euro aborta.
+- `x`: `2,5x` ou `3 vezes`. `contagem`: número puro; com escala sem `R$` (`11,1 milhões`) o valor é em unidades.
+- `data`: cada componente numérico é um número, com o inteiro escrito como valor. `15 e 16 de setembro de 2026` dá 15, 16 e 2026; `2T26` dá 2 e 26; `30/06/2026` dá 30, 6 e 2026; `281ª reunião` dá 281; ano de 1900 a 2099 sem separador dá o ano.
+- Sinal: `-` ou `−` colado ao número e fora de intervalo (`2026-2030` não tem sinal). Parênteses de valor negativo em tabela ficam fora do `bruto`, e o valor fica positivo.
+- Ignorados: CNPJ, CPF, CEP, NIRE, telefone, hora (`10h06`, `10:00h`), endereço web, numeração de parágrafo no início da linha (`12. `) e número colado a letra (`Copom1`, `B3`, `5G`).
+
+Todos os números do documento entram na tabela, não só os que virarão claims.
+
+## Saída
+
+- `documento_paginas`, `chunks` e `numeros`, numa transação, com `on conflict do nothing`: repetir a gravação não duplica linhas. A cópia local é `data/runs/<run_id>/documento.json`, gravada depois do Supabase.
+- O `DocumentoProcessado` valida a si mesmo: páginas contíguas a partir de 1, o `bruto` de cada número igual ao texto na âncora, e o texto de cada chunk igual ao intervalo das páginas.

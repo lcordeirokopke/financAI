@@ -1,4 +1,6 @@
-"""Ponto de entrada: python -m sunontent <fonte> [--dev].
+"""Ponto de entrada: python -m sunontent [fonte] [--dev].
+
+Sem a fonte, roda as três em sequência (copom, cvm e b3), um run por fonte.
 
 Lê os parâmetros, confere as credenciais do Supabase, gera o run_id, registra o run e escolhe a
 entrada do grafo (E0 no modo normal, nó de referência no --dev). Ver docs/fluxos/ingestao.md.
@@ -28,7 +30,9 @@ def gerar_run_id(fonte: str, momento: datetime) -> str:
 
 def _ler_parametros(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m sunontent", description=__doc__.splitlines()[0])
-    parser.add_argument("fonte", choices=FONTES, help="fonte do documento")
+    parser.add_argument(
+        "fonte", nargs="?", choices=FONTES, help="fonte do documento; sem ela, roda copom, cvm e b3 em sequência"
+    )
     parser.add_argument(
         "--dev",
         action="store_true",
@@ -119,9 +123,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         load_dotenv(RAIZ / ".env")
         repositorio = persistencia.criar_repositorio_supabase(os.environ)
         with persistencia.checkpointer_postgres(os.environ["SUPABASE_DB_URL"]) as checkpointer:
-            return executar(
-                parametros.fonte, dev=parametros.dev, repositorio=repositorio, checkpointer=checkpointer
-            )
+            codigos = [
+                executar(fonte, dev=parametros.dev, repositorio=repositorio, checkpointer=checkpointer)
+                for fonte in ([parametros.fonte] if parametros.fonte else FONTES)
+            ]
+            return int(any(codigos))
     except Falha as falha:
         # Antes de existir a linha em runs: credencial, conexão ou config inválida.
         print(f"erro ({falha.classe}): {falha.mensagem}", file=sys.stderr)

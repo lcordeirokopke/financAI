@@ -1,13 +1,13 @@
 # Testes
 
-Os testes ficam em `tests/` e rodam com `pytest` a partir da raiz do repositório. Hoje cobrem a E0 (coleta dos PDFs de Copom, CVM e B3), o manifest do run, o grafo e o `__main__`.
+Os testes ficam em `tests/` e rodam com `pytest` a partir da raiz do repositório. Hoje cobrem a E0 (coleta dos PDFs de Copom, CVM e B3), a E1 (leitura), o manifest do run, o grafo e o `__main__`.
 
 ## Para que servem
 
 Garantem que a coleta e o registro do run se comportem corretamente, principalmente nos casos de erro, que são difíceis de provocar na rede real:
 
 - página de erro no lugar do PDF: tenta de novo e, se persistir, aborta sem gravar nada;
-- PDF acima de 60 MiB: aborta;
+- PDF acima de 50 MiB: aborta;
 - Supabase fora do ar ou resposta perdida depois do commit: o run é fechado de forma consistente e nada é gravado em duplicidade;
 - documento de referência do modo `--dev` com hash diferente: o run para com mensagem clara.
 
@@ -38,7 +38,7 @@ O único teste que usa serviços reais é `test_persistencia_supabase.py`, contr
 
 Como a internet é simulada, nenhum teste confirma que os sites reais continuam respondendo no formato esperado. Se o BCB, a CVM ou a B3 mudarem o formato da listagem, os testes continuam passando e a coleta real quebra. Essa checagem só acontece rodando `python -m sunontent <fonte>` de verdade.
 
-Os documentos de `tests/fixtures/referencia/` ainda não foram congelados. Enquanto isso, os testes usam um PDF substituto mínimo e o teste que compara o hash da referência é pulado.
+Os documentos de `tests/fixtures/referencia/` estão congelados: Copom ata 281, CVM `cvm_fato_relevante_24708_1574050` e B3 2T26. O corpo do download simulado são os bytes desses PDFs, e as listagens de `tests/fixtures/http/` apontam para essas mesmas publicações.
 
 ## Estrutura
 
@@ -46,12 +46,30 @@ Os documentos de `tests/fixtures/referencia/` ainda não foram congelados. Enqua
 tests/
 ├── conftest.py                    # trava de host, marker, RepositorioMemoria, sem_espera
 ├── test_ingestao.py               # E0: HTTP simulado, repositório em memória
-├── test_main_graph.py             # manifest, grafo e __main__
+├── test_numeros.py                # parser de número brasileiro
+├── test_extracao.py               # E1: leitura, normalização, chunks, metadados, números e gravação
+├── test_main_graph.py             # manifest, grafo (E0 e E1) e __main__
 ├── test_persistencia_supabase.py  # integração com o Supabase local
 └── fixtures/
     ├── http/                      # respostas simuladas por fonte (listagem e página de erro)
-    └── referencia/                # documentos congelados por fonte
+    └── referencia/                # documentos congelados por fonte e o snapshot <fonte>.documento.json
 ```
+
+## E1: leitura
+
+`test_numeros.py` fixa o parser com igualdade exata em `Decimal`: cada formato aceito (`12,5%`, `R$ 1,2 bi`, `0,50 p.p.`, `47 bps`, `1.938,6`) e cada formato recusado (`1,234.56`, `12.5%`, `1.93`, `3.1`, `0.500`), que precisa levantar `NumeroNaoPrevisto` em vez de ser interpretado.
+
+`test_extracao.py` roda a E1 de verdade sobre os três PDFs de `tests/fixtures/referencia/`:
+
+- união de fragmentos: o que o PDF parte (`R$31` e `5,2`) se une, e rótulo de tabela, valor e célula vizinha não;
+- normalização: cabeçalho, rodapé e número de página, hifenização e caracteres invisíveis;
+- chunks por seção de cada fonte, cobertura do texto inteiro e consistência com o texto das páginas;
+- metadados de cada fonte e aborto quando o padrão não existe;
+- números conferidos à mão no PDF (`R$315,2 milhões`, `22,0%`, `13,75%`, `R$ 390.000.000,00`) e identificadores fora da tabela;
+- hash diferente, arquivo ausente, PDF sem camada de texto e arquivo que não é PDF: aborto terminal com mensagem clara;
+- snapshot `<fonte>.documento.json`: a saída precisa ser exatamente igual. Depois de uma mudança intencional, `REGERAR_DOCUMENTO=1 pytest tests/test_extracao.py` regrava os arquivos, e a diferença deve ser revisada.
+
+`test_main_graph.py` confere a E1 no grafo nos dois modos, a cópia local `documento.json` e o aborto do run quando a E1 falha. O teste de `test_persistencia_supabase.py` confere a gravação transacional e idempotente de `documento_paginas`, `chunks` e `numeros`.
 
 ## conftest.py
 
@@ -70,7 +88,7 @@ Testes de unidade da E0. Os parametrizados rodam uma vez por fonte (copom, cvm, 
 ### Caminho feliz
 
 - `test_coleta_grava_supabase_depois_copia_local`: a coleta devolve o `DocumentoFonte` correto, grava o PDF no bucket e o registro em documentos/coletas, e só depois cria a cópia local (PDF + `.json` com os metadados).
-- `test_referencia_bate_doc_sha256_e_doc_id`: o PDF congelado produz o mesmo `doc_sha256` e `doc_id` do `.json` de referência. Pulado enquanto a referência não existir.
+- `test_referencia_bate_doc_sha256_e_doc_id`: o PDF congelado produz o mesmo `doc_sha256` e `doc_id` do `.json` de referência.
 - `test_user_agent_explicito`: todas as requisições (listagem e PDF) enviam o `User-Agent` do projeto.
 
 ### Formato e tamanho (abortam sem gravar nada)

@@ -8,3 +8,4 @@ psycopg[binary]
 supabase
 python-dotenv
 httpx
+pymupdf

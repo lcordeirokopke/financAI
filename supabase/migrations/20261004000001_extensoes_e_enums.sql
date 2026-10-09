@@ -16,7 +16,8 @@ create type fonte as enum ('copom', 'cvm', 'b3');
 create type tipo_documento as enum ('copom_ata', 'cvm_fato_relevante', 'b3_release');
 
 -- Unidade de Numero (docs/arquiteturas.md, Número e âncora)
--- PENDENTE: como a unidade 'data' é representada em valor Decimal não está definido.
+-- Na unidade 'data', cada componente numérico da data é um número, com o inteiro escrito como valor
+-- (15 e 16 de setembro de 2026 dá 15, 16 e 2026). bps é gravado como 'pp' (1 bp = 0,01 p.p.).
 create type unidade_numero as enum ('pct', 'pp', 'BRL', 'BRL_mi', 'x', 'contagem', 'data');
 
 -- Claim.tipo (docs/arquiteturas.md, Claim)

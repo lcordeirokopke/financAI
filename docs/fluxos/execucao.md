@@ -6,7 +6,7 @@ Este documento descreve como um run começa, como o grafo é montado e executado
 
 | Peça | Papel |
 | ---- | ----- |
-| `sunontent/__main__.py` | Ponto de entrada (`python -m sunontent <fonte> [--dev]`). Lê o `.env`, confere as credenciais, gera o `run_id`, monta o manifest, registra o run, executa o grafo e fecha o run como `concluido` ou `abortado`. |
+| `sunontent/__main__.py` | Ponto de entrada (`python -m sunontent [fonte] [--dev]`). Lê o `.env`, confere as credenciais, gera o `run_id`, monta o manifest, registra o run, executa o grafo e fecha o run como `concluido` ou `abortado`. |
 | `sunontent/graph.py` | Monta o grafo LangGraph: as duas entradas (E0 ou referência), a constante `K` e `construir_grafo(checkpointer)`. A ordem das etapas fica só aqui. |
 | `sunontent/manifesto.py` | Lê `config/` e `prompts/` e devolve o `RunManifest` sem os campos do documento. |
 | `sunontent/schemas.py` | `RunManifest`, `PipelineState` e os tipos `Nivel`, `Fonte` e `Modo`. |
@@ -113,11 +113,12 @@ Contém os campos do `RunManifest` (em JSON) e, ao lado deles, `status`, `erro_c
 ```
 pip install -r requirements.txt
 cp .env.example .env        # preencher as três variáveis
-python -m sunontent copom            # modo normal: publicação mais recente
-python -m sunontent copom --dev      # documento de referência, sem download
+python -m sunontent                  # modo normal: copom, cvm e b3 em sequência, um run por fonte
+python -m sunontent --dev            # as três fontes com o documento de referência, sem download
+python -m sunontent copom [--dev]    # só uma fonte
 ```
 
-Rode a partir da raiz do repositório. O modo `--dev` precisa de `tests/fixtures/referencia/<fonte>.pdf` e `<fonte>.json`; sem eles, o run é abortado com a mensagem do arquivo ausente.
+Sem a fonte, as três rodam em sequência, cada uma com o seu `run_id`. Se um run abortar, os seguintes continuam e o código de saída é 1. Rode a partir da raiz do repositório. O modo `--dev` precisa de `tests/fixtures/referencia/<fonte>.pdf` e `<fonte>.json`; sem eles, o run é abortado com a mensagem do arquivo ausente.
 
 ## Testes
 

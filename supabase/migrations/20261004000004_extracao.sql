@@ -1,21 +1,19 @@
 -- E1 (DocumentoProcessado), E2 (FactSheet, Claim, Numero) e E3 (validação de âncoras).
 -- Ancora (docs/arquiteturas.md, Número e âncora) é gravada em colunas: pagina, offset_inicio, offset_fim,
 -- com offsets de caractere no texto limpo da página. chunks guarda um intervalo: offset_inicio
--- relativo a pagina_inicio e offset_fim relativo a pagina_fim.
--- PENDENTE: se pagina é 0- ou 1-indexada.
+-- relativo a pagina_inicio e offset_fim relativo a pagina_fim. A página é 1-indexada, como no PDF aberto por um humano.
 
 -- Texto limpo por página. Necessário para reverificar âncoras (docs/arquiteturas.md, E3. Validador de Âncoras).
--- PENDENTE: DocumentoProcessado não tem schema na documentação.
 create table documento_paginas (
   run_id      text not null references runs (run_id),
-  pagina      int not null check (pagina >= 0),
+  pagina      int not null check (pagina >= 1),
   texto_limpo text not null,
-  ocr         boolean not null default false,  -- PENDENTE: campo inferido (OCR por página, docs/arquiteturas.md, E1. Leitura)
+  ocr         boolean not null default false,  -- página lida por OCR (docs/arquiteturas.md, E1. Leitura); sempre false enquanto o OCR não existe
   primary key (run_id, pagina)
 );
 
 -- Chunks por seção lógica (docs/arquiteturas.md, E1. Leitura), usados pela M6 para recuperar contexto.
--- PENDENTE: estrutura do chunk não definida. A documentação descreve o índice vetorial como
+-- A E1 grava os chunks com embedding nulo. A documentação descreve o índice vetorial como
 -- efêmero (docs/arquiteturas.md, Diagrama do fluxo); persistir o embedding aqui é decisão em aberto.
 -- PENDENTE: dimensão do embedding depende do modelo de embedding, ainda não escolhido.
 create table chunks (
@@ -47,7 +45,7 @@ create table factsheets (
 );
 
 -- FactSheet.tabela_numeros: TODOS os números do fonte, com âncora. Gravada pela E1.
--- PENDENTE: a documentação indexa por bruto (docs/arquiteturas.md, FactSheet), mas o mesmo bruto pode
+-- A documentação indexa por bruto (docs/arquiteturas.md, FactSheet), mas o mesmo bruto pode
 -- aparecer em páginas diferentes; aqui a unicidade é por posição.
 create table numeros (
   id            bigint generated always as identity primary key,

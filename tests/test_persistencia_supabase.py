@@ -91,3 +91,36 @@ def test_coleta_completa_e_reaproveitamento(repositorio, ambiente, tmp_path):
             with pytest.raises(psycopg.Error, match="imutável"):
                 with conexao.transaction():
                     conexao.execute(sql, (sha,))
+
+
+def test_documento_processado_grava_paginas_chunks_e_numeros(repositorio, ambiente, tmp_path):
+    import json
+    from pathlib import Path
+
+    import psycopg
+
+    from sunontent.extracao import leitura
+    from sunontent.schemas import DocumentoFonte
+
+    referencia = Path(__file__).parent / "fixtures" / "referencia"
+    meta = json.loads((referencia / "cvm.json").read_text(encoding="utf-8"))
+    documento = leitura.processar(DocumentoFonte(caminho=referencia / "cvm.pdf", **meta), "cvm")
+    run_id = novo_run(ambiente["SUPABASE_DB_URL"])
+
+    for _ in range(2):  # a repetição não duplica linhas
+        persistencia.gravar_documento_processado(repositorio, tmp_path, run_id, documento)
+
+    with psycopg.connect(ambiente["SUPABASE_DB_URL"]) as conexao:
+        contagem = {
+            tabela: conexao.execute(f"select count(*) from {tabela} where run_id = %s", (run_id,)).fetchone()[0]
+            for tabela in ("documento_paginas", "chunks", "numeros")
+        }
+        valor = conexao.execute(
+            "select valor, unidade from numeros where run_id = %s and bruto = 'R$ 390.000.000,00'", (run_id,)
+        ).fetchone()
+    assert contagem == {
+        "documento_paginas": len(documento.paginas),
+        "chunks": len(documento.chunks),
+        "numeros": len(documento.tabela_numeros),
+    }
+    assert (str(valor[0]), valor[1]) == ("390000000.00", "BRL")

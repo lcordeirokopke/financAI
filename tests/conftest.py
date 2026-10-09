@@ -61,6 +61,9 @@ class RepositorioMemoria:
     falhas: dict[str, list[Exception]] = field(default_factory=dict)
     perder_resposta_da_transacao: int = 0
     chamadas: dict[str, int] = field(default_factory=dict)
+    paginas: dict[tuple, dict] = field(default_factory=dict)
+    chunks: dict[tuple, dict] = field(default_factory=dict)
+    numeros: dict[tuple, dict] = field(default_factory=dict)
 
     def registrar_run(self, run_id: str) -> None:
         self.runs[run_id] = {"coleta_id": None}
@@ -118,6 +121,21 @@ class RepositorioMemoria:
              "storage_path": f"{fonte}/{doc_sha256}.pdf", "tamanho_bytes": tamanho_bytes},
         )
         run.update(doc_id=doc_id, doc_sha256=doc_sha256, url_origem=url_origem, coletado_em=coletado_em)
+
+    def gravar_documento_processado(self, run_id, documento) -> None:
+        """Mesmas regras do Supabase: o run existe, linhas repetidas ficam como estão, tudo ou nada."""
+        self._entrar("gravar_documento_processado")
+        if run_id not in self.runs:
+            raise FalhaTerminal(f"run {run_id} não existe em runs")
+        paginas = {(run_id, p.pagina): {"texto_limpo": p.texto_limpo, "ocr": p.ocr} for p in documento.paginas}
+        chunks = {(run_id, c.chunk_id): c.model_dump() for c in documento.chunks}
+        numeros = {
+            (run_id, n.ancora.pagina, n.ancora.offset_inicio, n.ancora.offset_fim): n.model_dump()
+            for n in documento.tabela_numeros
+        }
+        for destino, novos in ((self.paginas, paginas), (self.chunks, chunks), (self.numeros, numeros)):
+            for chave, valor in novos.items():
+                destino.setdefault(chave, valor)
 
     def criar_run(self, manifest) -> None:
         self._entrar("criar_run")

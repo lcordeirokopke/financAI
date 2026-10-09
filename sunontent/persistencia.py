@@ -5,6 +5,7 @@ Funções da E0 e do run (docs/fluxos/ingestao.md, docs/arquiteturas.md):
 - transação de `documentos`, `coletas` e vínculo em `runs`, com releitura de `runs.coleta_id`;
 - registro do documento de referência do modo --dev, sem coleta;
 - criação e fechamento da linha de `runs`, e o manifest.json local;
+- saída da E1: páginas, chunks e números numa transação, e data/runs/<run_id>/documento.json;
 - cópia local em data/sources/<fonte>/ e data/runs/<run_id>/;
 - conexão do checkpointer do LangGraph.
 
@@ -22,7 +23,7 @@ from pathlib import Path
 from typing import Mapping, Protocol
 
 from sunontent.retentativa import Falha, FalhaRetriavel, FalhaTerminal, com_retentativa
-from sunontent.schemas import DocumentoFonte, RunManifest
+from sunontent.schemas import DocumentoFonte, DocumentoProcessado, RunManifest
 
 BUCKET_DOCUMENTOS = "documentos"
 
@@ -82,6 +83,10 @@ class Repositorio(Protocol):
         coletado_em: datetime,
     ) -> None:
         """Modo --dev, numa transação: documentos (sem efeito se o hash existe) e o vínculo em runs, sem coleta."""
+        ...
+
+    def gravar_documento_processado(self, run_id: str, documento: DocumentoProcessado) -> None:
+        """Numa transação: `documento_paginas`, `chunks` e `numeros`. Linhas que já existem ficam como estão."""
         ...
 
     def criar_run(self, manifest: RunManifest) -> None:
@@ -184,6 +189,20 @@ def registrar_documento_referencia(
         ),
         f"registro do documento de referência do run {run_id}",
     )
+
+
+def gravar_documento_processado(
+    repositorio: Repositorio, raiz_dados: Path, run_id: str, documento: DocumentoProcessado
+) -> Path:
+    """Grava a saída da E1 no Supabase e, depois, em data/runs/<run_id>/documento.json."""
+    com_retentativa(
+        lambda: repositorio.gravar_documento_processado(run_id, documento),
+        f"gravação do documento processado do run {run_id}",
+    )
+    destino = Path(raiz_dados) / "runs" / run_id / "documento.json"
+    texto = json.dumps(documento.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n"
+    _gravar_atomico(destino, texto.encode("utf-8"))
+    return destino
 
 
 def criar_run(repositorio: Repositorio, manifest: RunManifest) -> None:
@@ -424,6 +443,39 @@ class RepositorioSupabase:
                     raise FalhaTerminal(
                         f"run {run_id} não existe em runs ou já está vinculado a outro documento"
                     )
+
+        self._executar(transacao)
+
+    def gravar_documento_processado(self, run_id: str, documento: DocumentoProcessado) -> None:
+        paginas = [(run_id, p.pagina, p.texto_limpo, p.ocr) for p in documento.paginas]
+        chunks = [
+            (run_id, c.chunk_id, c.pagina_inicio, c.offset_inicio, c.pagina_fim, c.offset_fim, c.secao, c.texto)
+            for c in documento.chunks
+        ]
+        numeros = [
+            (run_id, n.bruto, n.valor, n.unidade, n.ancora.pagina, n.ancora.offset_inicio, n.ancora.offset_fim)
+            for n in documento.tabela_numeros
+        ]
+
+        def transacao(conexao):
+            with conexao.transaction(), conexao.cursor() as cursor:
+                cursor.executemany(
+                    "insert into documento_paginas (run_id, pagina, texto_limpo, ocr) values (%s, %s, %s, %s)"
+                    " on conflict (run_id, pagina) do nothing",
+                    paginas,
+                )
+                cursor.executemany(
+                    "insert into chunks (run_id, chunk_id, pagina_inicio, offset_inicio, pagina_fim, offset_fim,"
+                    " secao, texto) values (%s, %s, %s, %s, %s, %s, %s, %s)"
+                    " on conflict (run_id, chunk_id) do nothing",
+                    chunks,
+                )
+                cursor.executemany(
+                    "insert into numeros (run_id, bruto, valor, unidade, pagina, offset_inicio, offset_fim)"
+                    " values (%s, %s, %s, %s::unidade_numero, %s, %s, %s)"
+                    " on conflict (run_id, pagina, offset_inicio, offset_fim) do nothing",
+                    numeros,
+                )
 
         self._executar(transacao)
 

@@ -279,4 +279,4 @@ Todos os erros desta tabela vêm de `ingestao/` e acontecem sem existir célula 
 
 ## Pendências
 
-- Documentos de referência: `tests/fixtures/referencia/<fonte>.pdf`, `<fonte>.json` e `<fonte>.anotacao.yaml` ainda não foram congelados. Até lá, os testes da E0 que conferem `doc_sha256` e `doc_id` contra `<fonte>.json` são pulados, e o corpo do download simulado é um PDF substituto mínimo. As respostas de listagem em `tests/fixtures/http/<fonte>/` apontam para as publicações mais recentes na data da sua gravação: Copom ata 281, CVM `cvm_fato_relevante_24708_1574050` e B3 2T26.
+- `<fonte>.anotacao.yaml` de cada fonte ainda não existe em `tests/fixtures/referencia/`. Ele só é necessário para o teste de cobertura da E2.

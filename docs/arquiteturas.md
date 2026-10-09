@@ -57,6 +57,8 @@ class Numero(BaseModel):
 
 As unidades cobrem o que os três tipos de documento produzem: `pct` (taxa), `pp` (variação de taxa), `BRL` e `BRL_mi` (valor, normalizado para milhões quando o fonte escreve "bi"), `x` (múltiplo, como alavancagem), `contagem` (número puro: "5 dos 9 membros votaram") e `data` (trimestre, ano, número de reunião). A distinção `pct` vs `pp` não é cosmética: "subiu 0,50 p.p." e "subiu 0,50%" são afirmações diferentes, e confundi-las é erro factual.
 
+Na unidade `data`, cada componente numérico da data é um `Numero`, com o inteiro escrito como valor: `15 e 16 de setembro de 2026` dá 15, 16 e 2026, e `2T26` dá 2 e 26. Pontos-base (`bps`) são gravados como `pp`, com 1 bp igual a 0,01 p.p. As regras completas do parser estão em `docs/fluxos/leitura.md`.
+
 `Numero.valor` é `Decimal`, nunca `float`. Comparação de igualdade com float quebra a verificação de fidelidade numérica silenciosamente.
 
 ## Claim
@@ -75,6 +77,36 @@ class Claim(BaseModel):
 ```
 
 `tipo` e `tags` não são decorativos: os adapters usam `tags` para priorizar (o nível Iniciante prioriza `impacto_pratico`) e o avaliador usa `tipo` para exigir atribuição explícita em `projecao` (uma projeção do Copom não pode virar afirmação do artigo).
+
+## DocumentoProcessado
+
+```python
+class Pagina(BaseModel):
+    pagina: int             # 1-indexada
+    texto_limpo: str
+    ocr: bool = False
+
+class Chunk(BaseModel):
+    chunk_id: str           # "K01"
+    secao: str | None
+    pagina_inicio: int
+    offset_inicio: int
+    pagina_fim: int
+    offset_fim: int
+    texto: str
+
+class DocumentoProcessado(BaseModel):
+    doc_id: str
+    doc_sha256: str
+    tipo_documento: Literal["copom_ata", "cvm_fato_relevante", "b3_release"]
+    emissor: str
+    data_documento: date
+    paginas: list[Pagina]
+    chunks: list[Chunk]
+    tabela_numeros: list[Numero]
+```
+
+Saída da E1, detalhada em `docs/fluxos/leitura.md`. `data_documento` é o último dia da reunião no Copom, a data da assinatura na CVM e a data-base do balanço na B3. `emissor` é texto fixo para Copom e B3 e a primeira linha da primeira página na CVM. O modelo valida a si mesmo: o `bruto` de cada número bate com o texto na âncora e o texto de cada chunk bate com o intervalo das páginas.
 
 ## FactSheet
 
@@ -303,7 +335,7 @@ Detalhada em `docs/fluxos/ingestao.md`. No modo normal, baixa a publicação mai
 
 **Gera:** `DocumentoProcessado` com chunks posicionados, `tabela_numeros` e metadados. Grava o texto limpo por página em `documento_paginas`, os chunks em `chunks` e a `tabela_numeros` em `numeros`.
 
-**Natureza:** determinístico. Zero LLM, zero token.
+**Natureza:** determinístico. Zero LLM, zero token. Detalhada em `docs/fluxos/leitura.md`.
 
 **Como falha:** arquivo ausente ou SHA-256 dos bytes diferente do `doc_sha256` do `DocumentoFonte`: aborta o run com erro terminal, indicando o arquivo, o hash esperado e o encontrado, e pedindo para apagar o arquivo local; a próxima coleta grava o PDF de novo. PDF sem camada de texto e OCR ruim: aborta o run com erro terminal, não gera claims errados. Número em formato não previsto (`1.234,56` vs `1,234.56`) é o bug mais provável de toda a etapa, e ele se manifesta bem longe daqui: como falso positivo de fidelidade numérica na etapa 6. Teste esta etapa com paranoia.
 
@@ -643,7 +675,7 @@ Isso não é otimização, é o que sustenta a conta de custo desta arquitetura.
 
 Se você usar LangGraph, isso significa usar o checkpointer com um thread por célula no fan-out, e não um único thread para o documento.
 
-O checkpointer é o `PostgresSaver` (`langgraph-checkpoint-postgres`) no Postgres do Supabase do site, no schema `langgraph`, que fica fora dos schemas expostos pela Data API. A conexão do checkpointer é criada por `sunontent/persistencia.py` a partir de `SUPABASE_DB_URL`, é separada da conexão das tabelas do projeto, usa `search_path = langgraph`, `autocommit=True` e `row_factory=dict_row`, e passa pelo session pooler (porta 5432) ou pela conexão direta, porque o modo transação do pooler não suporta prepared statements. `setup()` cria as tabelas na primeira execução. O `thread_id` de cada célula é `<run_id>:<celula_id>`. O checkpoint não tem cópia local: as saídas de cada etapa são gravadas pelas funções do projeto no Supabase e em `data/runs/<run_id>/`. Na retomada, o checkpoint decide qual nó roda; antes de chamar o modelo, cada nó confere nas tabelas se a sua linha já existe e a reaproveita.
+O checkpointer é o `PostgresSaver` (`langgraph-checkpoint-postgres`) no Postgres do Supabase do site, no schema `langgraph`, que fica fora dos schemas expostos pela Data API. A conexão do checkpointer é criada por `sunontent/persistencia.py` a partir de `SUPABASE_DB_URL`, é separada da conexão das tabelas do projeto, usa `search_path = langgraph`, `autocommit=True` e `row_factory=dict_row`, e passa pelo session pooler (porta 5432) ou pela conexão direta, porque o modo transação do pooler não suporta prepared statements. `setup()` cria as tabelas na primeira execução. O `thread_id` de cada célula é `<run_id>:<celula_id>`; enquanto o grafo não tem células, o `thread_id` é o próprio `run_id` (`docs/fluxos/execucao.md`). O checkpoint não tem cópia local: as saídas de cada etapa são gravadas pelas funções do projeto no Supabase e em `data/runs/<run_id>/`. Na retomada, o checkpoint decide qual nó roda; antes de chamar o modelo, cada nó confere nas tabelas se a sua linha já existe e a reaproveita.
 
 ---
 
@@ -752,7 +784,7 @@ Teto de orçamento por documento que **aborta**, não que só loga. Limitador de
 
 ## 9. Failure handling
 
-Separar **retriável** (429, timeout, falha de parse, 5xx, e timeout, erro de conexão ou 5xx ao gravar no Supabase) de **terminal** (content filter, orçamento esgotado, documento ilegível, gravação recusada pelo Supabase e falha ao gravar a cópia local). Um objeto que já existe no bucket `documentos` não é falha: é o mesmo documento, reaproveitado. Numa célula, falha de gravação terminal ou com as tentativas esgotadas leva a célula a `ERRO_INFRA`; fora das células, aborta o run.
+Separar **retriável** (429, timeout, falha de parse, 5xx, conteúdo baixado que não é PDF (página de erro temporária da fonte), e timeout, erro de conexão ou 5xx ao gravar no Supabase) de **terminal** (content filter, orçamento esgotado, documento ilegível, gravação recusada pelo Supabase e falha ao gravar a cópia local). Um objeto que já existe no bucket `documentos` não é falha: é o mesmo documento, reaproveitado. Numa célula, falha de gravação terminal ou com as tentativas esgotadas leva a célula a `ERRO_INFRA`; fora das células, aborta o run.
 
 E manter `ERRO_INFRA` como estado de célula distinto de `REPROVADA`. Os dois chegam ao revisor humano de formas diferentes: um se retenta pela retomada do checkpoint da célula, disparada por um comando do `__main__.py` que recebe o `run_id`, sem intervenção editorial; o outro precisa de intervenção editorial. Colapsar os dois num "falhou" genérico é o erro mais fácil de cometer e o mais chato de desfazer depois.
 

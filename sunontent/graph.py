@@ -1,12 +1,13 @@
 """Monta o grafo LangGraph. A ordem das etapas, o fan-out e o retry ficam só aqui.
 
-Etapas implementadas: E0 (coleta) e a entrada do modo --dev (referencia). As duas entradas
-terminam o grafo até a E1 existir; quando ela for criada, ambas passam a seguir para ela.
+Etapas implementadas: E0 (coleta), a entrada do modo --dev (referencia) e a E1 (leitura). As duas
+entradas seguem para a E1, que termina o grafo até a E2 existir.
 """
 
 from langgraph.graph import END, START, StateGraph
 
 from sunontent.nodes.coleta import coleta
+from sunontent.nodes.leitura import leitura
 from sunontent.nodes.referencia import referencia
 from sunontent.schemas import PipelineState
 
@@ -22,7 +23,9 @@ def construir_grafo(checkpointer=None):
     grafo = StateGraph(PipelineState)
     grafo.add_node("coleta", coleta)
     grafo.add_node("referencia", referencia)
+    grafo.add_node("leitura", leitura)
     grafo.add_conditional_edges(START, escolher_entrada, ["coleta", "referencia"])
-    grafo.add_edge("coleta", END)
-    grafo.add_edge("referencia", END)
+    grafo.add_edge("coleta", "leitura")
+    grafo.add_edge("referencia", "leitura")
+    grafo.add_edge("leitura", END)
     return grafo.compile(checkpointer=checkpointer)

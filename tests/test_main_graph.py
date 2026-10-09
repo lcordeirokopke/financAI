@@ -18,23 +18,19 @@ from test_ingestao import cliente, listagem
 
 RAIZ = Path(__file__).resolve().parent.parent
 MOMENTO = datetime(2026, 10, 6, 15, 0, 0, tzinfo=timezone.utc)
-PDF = b"%PDF-1.7\n% referencia de teste\n%%EOF\n"
+REFERENCIA = RAIZ / "tests" / "fixtures" / "referencia"
+PDF = (REFERENCIA / "copom.pdf").read_bytes()
 
 
 @pytest.fixture
 def raiz(tmp_path):
-    """Cópia de config/ e prompts/ e uma referência do Copom, tudo em tmp_path."""
+    """Cópia de config/ e prompts/ e da referência do Copom, tudo em tmp_path."""
     shutil.copytree(RAIZ / "config", tmp_path / "config")
     shutil.copytree(RAIZ / "prompts", tmp_path / "prompts")
     pasta = tmp_path / "tests" / "fixtures" / "referencia"
     pasta.mkdir(parents=True)
-    (pasta / "copom.pdf").write_bytes(PDF)
-    (pasta / "copom.json").write_text(json.dumps({
-        "doc_id": "copom_ata_281",
-        "doc_sha256": hashlib.sha256(PDF).hexdigest(),
-        "url_origem": "https://exemplo/copom.pdf",
-        "coletado_em": "2026-10-03T17:22:05Z",
-    }), encoding="utf-8")
+    shutil.copy(REFERENCIA / "copom.pdf", pasta / "copom.pdf")
+    shutil.copy(REFERENCIA / "copom.json", pasta / "copom.json")
     return tmp_path
 
 
@@ -243,3 +239,61 @@ def test_cli_recusa_fonte_desconhecida():
     with pytest.raises(SystemExit):
         principal._ler_parametros(["xyz"])
     assert principal._ler_parametros(["cvm", "--dev"]).dev is True
+
+
+# E1 no grafo
+
+
+def test_modo_dev_grava_o_documento_processado(raiz, repo):
+    assert rodar(raiz, repo, dev=True) == 0
+    (run_id,) = repo.runs
+    assert repo.paginas and repo.chunks and repo.numeros
+    assert {chave[0] for chave in repo.paginas} == {run_id}
+    documento = json.loads((raiz / "data" / "runs" / run_id / "documento.json").read_text(encoding="utf-8"))
+    assert documento["tipo_documento"] == "copom_ata" and documento["data_documento"] == "2026-09-16"
+
+
+def test_modo_normal_tambem_passa_pela_e1(raiz, repo):
+    assert rodar(raiz, repo, dev=False, http=cliente(listagem("copom"), fonte="copom")) == 0
+    assert repo.paginas and repo.numeros
+
+
+def test_e1_com_hash_diferente_aborta_o_run_sem_gravar_nada(raiz, repo, monkeypatch):
+    original = graph.referencia
+
+    def referencia_com_hash_errado(state, config):
+        resultado = original(state, config)
+        resultado["documento_fonte"] = resultado["documento_fonte"].model_copy(update={"doc_sha256": "0" * 64})
+        return resultado
+
+    monkeypatch.setattr(graph, "referencia", referencia_com_hash_errado)
+    assert rodar(raiz, repo, dev=True) == 1
+    (run,) = repo.runs.values()
+    assert run["status"] == "abortado" and run["erro_classe"] == "terminal"
+    assert "SHA-256" in run["erro_mensagem"] and "Apague" in run["erro_mensagem"]
+    assert not repo.paginas and not repo.numeros
+    assert not list((raiz / "data" / "runs").glob("*/documento.json"))
+
+
+# __main__: fonte opcional
+
+
+def test_sem_fonte_o_cli_roda_as_tres(monkeypatch, repo):
+    from contextlib import nullcontext
+
+    chamadas = []
+
+    def falso(fonte, **kwargs):
+        chamadas.append((fonte, kwargs["dev"]))
+        return 1 if fonte == "cvm" else 0
+
+    monkeypatch.setattr(principal, "executar", falso)
+    monkeypatch.setattr(principal.persistencia, "criar_repositorio_supabase", lambda ambiente: repo)
+    monkeypatch.setattr(principal.persistencia, "checkpointer_postgres", lambda url: nullcontext(None))
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://localhost/x")
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: None)
+    assert principal.main(["--dev"]) == 1  # a CVM falhou, mas as outras rodaram
+    assert chamadas == [("copom", True), ("cvm", True), ("b3", True)]
+    chamadas.clear()
+    assert principal.main(["b3"]) == 0
+    assert chamadas == [("b3", False)]
